@@ -336,4 +336,4 @@ def slider_callback(num_nodes, relayout_data):
 
 
 if __name__ == "__main__":
-    app.run_server(debug=False)
+    app.run(debug=False)

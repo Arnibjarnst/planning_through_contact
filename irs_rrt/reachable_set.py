@@ -99,11 +99,11 @@ class ReachableSet:
         if np.sum(is_valid_batch) == 0:
             raise RuntimeError("Cannot compute B and c hat for reachable sets.")
 
-        B_batch = np.array(B_batch)
-        x_next_batch = np.array(x_next_batch)
+        B_batch = np.array([B_batch[idx] for idx, valid in enumerate(is_valid_batch) if valid])
+        x_next_batch = np.array(x_next_batch)[is_valid_batch]
 
-        chat = np.mean(x_next_batch[is_valid_batch], axis=0)
-        Bhat = np.mean(B_batch[is_valid_batch], axis=0)
+        chat = np.mean(x_next_batch, axis=0)
+        Bhat = np.mean(B_batch, axis=0)
         return Bhat, chat
 
     def calc_bundled_Bc_randomized_zero_numpy(self, q, ubar):
@@ -162,6 +162,22 @@ class ReachableSet:
 
         Bhat = self.q_sim.get_Dq_nextDqa_cmd()
         return Bhat, q_next
+    
+    def calc_bundled_Bc_analytic_batch(self, q_batch, ubar_batch):
+        assert self.rrt_params.smoothing_mode in kAnalyticSmoothingModes
+        self.sim_params.gradient_mode = GradientMode.kBOnly
+        self.sim_params.forward_mode = kSmoothingMode2ForwardDynamicsModeMap[
+            self.rrt_params.smoothing_mode
+        ]
+        (
+            q_next_batch,
+            A_batch,
+            B_batch,
+            is_valid_batch,
+        ) = self.q_sim_batch.calc_dynamics_parallel(
+            q_batch, ubar_batch, self.sim_params
+        )
+        return B_batch, q_next_batch, is_valid_batch
 
     def calc_metric_parameters(self, Bhat, chat):
         cov = Bhat @ Bhat.T + self.rrt_params.regularization * np.eye(

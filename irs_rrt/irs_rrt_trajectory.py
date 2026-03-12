@@ -1,0 +1,611 @@
+import numpy as np
+from pydrake.solvers import GurobiSolver
+from pydrake.solvers import MathematicalProgram
+
+from pydrake.all import Quaternion, RollPitchYaw, AngleAxis, RigidTransform, JacobianWrtVariable
+
+from qsim.simulator import QuasistaticSimulator
+from qsim_cpp import QuasistaticSimulatorCpp
+
+from irs_rrt.contact_sampler import ContactSampler
+from irs_rrt.irs_rrt import IrsRrt, IrsNode, IrsEdge
+from irs_rrt.rrt_base import Node
+from irs_rrt.rrt_params import DuStarMode, DistanceMetric, IrsRrtTrajectoryParams
+
+# For prettier tqdm bar in jupyter notebooks.
+from tqdm import tqdm
+
+if "get_ipython" in locals() or "get_ipython" in globals():
+    if get_ipython().__class__.__name__ == "ZMQInteractiveShell":
+        print("Running in a jupyter notebook!")
+        from tqdm.notebook import tqdm
+
+
+class IrsTrajectoryNode(IrsNode):
+    """
+    IrsNode. Each node is responsible for keeping a copy of the bundled dynamics
+    and the Gaussian parametrized by the bundled dynamics.
+    """
+
+    def __init__(self, q: np.array):
+        super().__init__(q)
+
+        # Contact mode id for grouping
+        self.contact_mode_id = None
+
+        # Closest obj_pose(t) to q
+        self.t = None
+        self.distance_from_traj = None
+        self.is_static = False
+
+        self.is_active = True
+
+class IrsRrtTrajectory(IrsRrt):
+    def __init__(
+        self,
+        rrt_params: IrsRrtTrajectoryParams,
+        contact_sampler: ContactSampler,
+        q_sim: QuasistaticSimulatorCpp,
+        q_sim_py: QuasistaticSimulator,
+        get_obj_pose_from_t,
+        q_sim_smooth: QuasistaticSimulatorCpp | None = None,
+    ):
+        self.get_obj_pose_from_t = get_obj_pose_from_t
+
+        self.contact_sampler = contact_sampler
+        super().__init__(rrt_params, q_sim, q_sim_py, q_sim_smooth)
+        self.solver = GurobiSolver()
+        self.root_node.contact_mode_id = 0
+        self.root_node.is_static = self.is_static(self.root_node.q)
+        self.root_node.t, self.root_node.distance_from_traj = self.closest_t_in_trajectory(self.root_node.q[self.q_u_indices_into_x])
+        self.next_contact_id = 1
+        self.subgoal_ts = rrt_params.subgoal_ts
+        self.min_t = 0.0
+        self.curr_goal_i = 1
+        self.q_curr_goal = np.zeros(self.dim_x)
+        self.q_curr_goal[self.q_u_indices_into_x] = get_obj_pose_from_t(self.subgoal_ts[self.curr_goal_i])
+
+        self.max_static_t = 0
+
+        self.idx_u = self.py_plant.GetModelInstanceByName("box")
+        possible_names = [["ur5_l", "ur5_r"], ["ur5e_l", "ur5e_r"], ["finger_left", "finger_rigth"]]
+        for names in possible_names:
+            try:
+                self.idx_a_l = self.py_plant.GetModelInstanceByName(names[0])
+                self.idx_a_r = self.py_plant.GetModelInstanceByName(names[1])
+                break
+            except:
+                continue
+
+        self.idx_q_a_l = self.q_a_indices_into_x[:len(self.q_a_indices_into_x)//2]
+        self.idx_q_a_r = self.q_a_indices_into_x[len(self.q_a_indices_into_x)//2:]
+
+    def sample_subgoal(self):
+        """
+        Sample a subgoal from the configuration space.
+        """
+        # sample robots (doesn't matter)
+        subgoal = np.random.rand(self.dim_x)
+        subgoal = self.q_lb + (self.q_ub - self.q_lb) * subgoal
+
+        # sample obj pose
+        t0 = max(self.min_t, self.subgoal_ts[self.curr_goal_i - 1])
+        t1 = self.subgoal_ts[self.curr_goal_i]
+        t = np.random.rand() * (t1 - t0) + t0
+
+        obj_pose_t = self.get_obj_pose_from_t(t)
+        obj_quat_t = Quaternion(obj_pose_t[:4])
+        obj_trans_t = obj_pose_t[4:]
+
+        quat_noise = RollPitchYaw(subgoal[self.q_u_indices_into_x[:3]]).ToQuaternion()
+
+        obj_quat = obj_quat_t.multiply(quat_noise)
+
+        trans_noise = subgoal[self.q_u_indices_into_x[4:]]
+        obj_trans = obj_trans_t + trans_noise
+
+        obj_pose = np.concatenate((obj_quat.wxyz(), obj_trans))
+
+        subgoal[self.q_u_indices_into_x] = obj_pose
+
+        return subgoal, t
+    
+    def calc_distance(self, query, node):
+        # 1 x n
+        mu_batch = node.chat_u[None, :]
+        # 1 x n x n
+        covinv_tensor = node.covinv_u[None, :, :]
+        error_batch = query - mu_batch
+        int_batch = np.einsum("Bij,Bi -> Bj", covinv_tensor, error_batch)
+        metric_batch = np.einsum("Bi,Bi -> B", int_batch, error_batch)
+
+        return metric_batch[0]
+
+
+    def select_closest_nodes(
+        self,
+        subgoal: np.array,
+        max_t: float,
+        k_closest: int,
+        d_threshold: float = np.inf,
+        print_distance: bool = False,
+    ):
+        """
+        Given a subgoal, this function finds the node that is closest from the
+         subgoal.
+        None is returned if the distances of all nodes are greater than
+         d_treshold.
+        """
+        d_batch = self.calc_distance_batch(subgoal)
+
+        i_min = np.argsort(d_batch)
+        i_min = i_min[d_batch[i_min] < d_threshold]
+
+        selected_nodes = []
+        selected_contact_modes = set()
+        i = 0
+        while i < len(i_min) and len(selected_nodes) < k_closest:
+            node = self.get_node_from_id(i_min[i])
+            i += 1
+            if self.rrt_params.connect_from_behind and node.t > max_t:
+                continue
+            if node.contact_mode_id not in selected_contact_modes and node.is_active:
+                selected_nodes.append(node)
+                selected_contact_modes.add(node.contact_mode_id)
+
+        if print_distance:
+            print("closest distances to subgoal", d_batch[i_min])
+
+        return selected_nodes
+    
+    
+    def select_closest_static_nodes(
+        self,
+        subgoal: np.array,
+        max_t: float,
+        k_closest: int,
+        d_threshold: float = np.inf,
+        print_distance: bool = False,
+    ):
+        """
+        Given a subgoal, this function finds the nodes that are closest to the
+         subgoal using 8 corner difference.
+        """
+        if self.rrt_params.static_distance_metric == DistanceMetric.Corner:
+            pose_batch = self.get_q_matrix_up_to()[:, self.q_u_indices_into_x]
+            subgoal_pose = subgoal[self.q_u_indices_into_x]
+            d_batch = self.calc_distance_batch_corners(subgoal_pose, pose_batch)
+        elif self.rrt_params.static_distance_metric == DistanceMetric.Mahalabonis:
+            d_batch = self.calc_distance_batch(subgoal)
+        else:
+            raise Exception(f"Invalid Distance Metric {self.rrt_params.static_distance_metric}")
+
+        
+        i_min = np.argsort(d_batch)
+        i_min = i_min[d_batch[i_min] < d_threshold]
+
+        selected_nodes = []
+        i = 0
+        while i < len(i_min) and len(selected_nodes) < k_closest:
+            node = self.get_node_from_id(i_min[i])
+            i += 1
+            if self.rrt_params.connect_from_behind and node.t > max_t:
+                continue
+            if node.is_static and node.is_active:
+                if print_distance:
+                    print("closest distance to subgoal", d_batch[i_min[i]])
+                selected_nodes.append(node)
+
+        return selected_nodes
+    
+    def closest_t_in_trajectory(self, obj_pose):
+        ts = np.linspace(0,1,101)
+        poses_t = np.array([self.get_obj_pose_from_t(t) for t in ts])
+
+        dists = self.calc_distance_batch_corners(obj_pose, poses_t)
+
+        i_min = np.argmin(dists)
+
+        return ts[i_min], dists[i_min]
+    
+    def dist_to_q(self, q):
+        pose_batch = self.get_q_matrix_up_to()[:, self.q_u_indices_into_x]
+        q_pose = q[self.q_u_indices_into_x]
+        return np.min(self.calc_distance_batch_corners(q_pose, pose_batch))
+    
+    def step_in(self, q):
+        """
+        Given a near-contact configuration, give a q that steps in contact.
+        """
+        self.q_sim_py.update_mbp_positions_from_vector(q)
+
+        sg = self.q_sim_py.get_scene_graph()
+        query_object = sg.GetOutputPort("query").Eval(self.q_sim_py.context_sg)
+        collision_pairs = query_object.ComputeSignedDistancePairwiseClosestPoints(
+            0.05
+        )
+
+        inspector = query_object.inspector()
+
+        # 1. Compute closest distance pairs and normals.
+        min_dist_left = np.inf
+        min_dist_right = np.inf
+
+        min_body_left = None
+        min_body_right = None
+        min_normal_left = None
+        min_normal_right = None
+
+        for collision in collision_pairs:
+            f_id = inspector.GetFrameId(collision.id_A)
+            body_A = self.py_plant.GetBodyFromFrameId(f_id)
+            f_id = inspector.GetFrameId(collision.id_B)
+            body_B = self.py_plant.GetBodyFromFrameId(f_id)
+
+            # We only care about collisions with the box
+            if body_A.model_instance() != self.idx_u and body_B.model_instance() != self.idx_u:
+                continue
+
+            # left ee collision
+            if (body_A.model_instance() == self.idx_a_l) or (body_B.model_instance() == self.idx_a_l):
+                if collision.distance < min_dist_left:
+                    min_dist_left = collision.distance
+                    min_body_left = body_A if body_A.model_instance() == self.idx_a_l else body_B
+                    normal_sign = 1 if body_A.model_instance() == self.idx_a_r else -1
+                    min_normal_left = normal_sign * collision.nhat_BA_W
+
+            # right ee collision
+            if (body_A.model_instance() == self.idx_a_r) or (body_B.model_instance() == self.idx_a_r):
+                if collision.distance < min_dist_right:
+                    min_dist_right = collision.distance
+                    min_body_right = body_A if body_A.model_instance() == self.idx_a_r else body_B
+                    normal_sign = 1 if body_A.model_instance() == self.idx_a_r else -1
+                    min_normal_right = normal_sign * collision.nhat_BA_W
+
+        q_next = np.copy(q)
+
+        if min_body_left:
+            # 2. Compute Jacobians and qdot.
+            J_L = self.py_plant.CalcJacobianTranslationalVelocity(
+                self.q_sim_py.context_plant,
+                JacobianWrtVariable.kV,
+                min_body_left.body_frame(),
+                np.array([0, 0, 0]),
+                self.py_plant.world_frame(),
+                self.py_plant.world_frame(),
+            )
+
+            J_La = J_L[:2, self.idx_q_a_l]
+
+            qdot_La = np.linalg.pinv(J_La).dot(min_dist_left * -min_normal_left[:2])
+
+            q_next[self.idx_q_a_l] += qdot_La
+
+        if min_body_right:
+            J_R = self.py_plant.CalcJacobianTranslationalVelocity(
+                self.q_sim_py.context_plant,
+                JacobianWrtVariable.kV,
+                min_body_right.body_frame(),
+                np.array([0, 0, 0]),
+                self.py_plant.world_frame(),
+                self.py_plant.world_frame(),
+            )
+
+            J_Ra = J_R[:2, self.idx_q_a_r]
+
+            qdot_Ra = np.linalg.pinv(J_Ra).dot(min_dist_right * -min_normal_right[:2])
+
+            q_next[self.idx_q_a_r] += qdot_Ra
+
+        return q_next
+    
+    def iterate(self):
+        """
+        Main method for iteration.
+        """
+        pbar = tqdm(total=self.max_size)
+
+        time_to_dist_to_goal = []
+
+        if self.root_node.is_static:
+            initial_nodes = []
+            initial_edges = []
+
+            for _ in range(self.rrt_params.initial_contact_samples):
+                try:
+                    child_node, edge = self.sample_contact(self.root_node)
+                    initial_nodes.append(child_node)
+                    initial_edges.append(edge)
+                except RuntimeError:
+                    continue
+        
+            initial_nodes = np.array(initial_nodes)
+            initial_edges = np.array(initial_edges)
+
+            is_valid = self.add_nodes(initial_nodes, draw_first_node=True)
+            initial_nodes = initial_nodes[is_valid]
+            initial_edges = initial_edges[is_valid]
+
+            for node, edge in zip(initial_nodes, initial_edges):
+                node.value = edge.parent.value + edge.cost
+                self.add_edge(edge)
+
+            pbar.update(len(initial_nodes))
+
+        while self.size < self.rrt_params.max_size:
+            # 1. Sample a subgoal.
+            if self.cointoss_for_goal():
+                subgoal = self.q_curr_goal
+                subgoal_t = self.subgoal_ts[self.curr_goal_i]
+            else:
+                subgoal, subgoal_t = self.sample_subgoal()
+
+            print(f"Sampling in range [{self.subgoal_ts[self.curr_goal_i-1]};{self.subgoal_ts[self.curr_goal_i]}] -> {subgoal_t}")
+
+            regrasp = np.random.rand() < self.rrt_params.grasp_prob
+
+            # 2. Sample closest nodes to subgoal
+            if regrasp:
+                parent_nodes = self.select_closest_static_nodes(
+                    subgoal, subgoal_t, self.rrt_params.batch_size, d_threshold=self.rrt_params.distance_threshold
+                )
+            else:
+                parent_nodes = self.select_closest_nodes(
+                    subgoal, subgoal_t, self.rrt_params.batch_size, d_threshold=self.rrt_params.distance_threshold
+                )
+
+            # update progress only if a valid parent_node is chosen.
+            if len(parent_nodes) == 0:
+                continue
+
+            child_nodes = []
+            edges = []
+            for parent_node in parent_nodes:
+                # 3. Extend to subgoal.
+                try:
+                    if regrasp:
+                        child_node, edge = self.sample_contact(parent_node)
+                    else:
+                        child_node, edge = self.extend_towards_q(parent_node, subgoal)
+                        if child_node.is_static:
+                            self.max_static_t = max(self.max_static_t, child_node.t)
+                except RuntimeError as e:
+                    print(e)
+                    continue
+
+                if self.rrt_params.connect_to_front and child_node.t < parent_node.t:
+                    continue
+
+                child_nodes.append(child_node)
+                edges.append(edge)
+
+            child_nodes = np.array(child_nodes)
+            edges = np.array(edges)
+            
+            if self.size + len(child_nodes) > self.max_size:
+                nodes_to_keep = self.max_size - self.size
+                child_nodes = child_nodes[:nodes_to_keep]
+                edges = edges[:nodes_to_keep]
+
+            # 4. Register the new node to the graph.
+            try:
+                is_valid = self.add_nodes(child_nodes, draw_first_node=True)
+                child_nodes = child_nodes[is_valid]
+                edges = edges[is_valid]
+            except RuntimeError as e:
+                print(e)
+                continue
+
+            print(f"max static t: {self.max_static_t}")
+
+            for child_node, edge in zip(child_nodes, edges):
+                child_node.value = edge.parent.value + edge.cost
+                self.add_edge(edge)
+
+            pbar.update(len(child_nodes))
+
+            # 5. Check for termination.
+            dist_to_goal = self.dist_to_q(self.goal)
+            dist_to_curr_goal = self.dist_to_q(self.q_curr_goal)
+
+            time_to_dist_to_goal.append([(pbar.last_print_t - pbar.start_t), dist_to_goal])
+
+            print(dist_to_curr_goal, dist_to_goal)
+            if dist_to_curr_goal < self.rrt_params.subgoal_tolerance and self.curr_goal_i < len(self.subgoal_ts) - 1:
+                self.curr_goal_i += 1
+                self.q_curr_goal = np.zeros(self.dim_x)
+                self.q_curr_goal[self.q_u_indices_into_x] = self.get_obj_pose_from_t(self.subgoal_ts[self.curr_goal_i])
+                print("FOUND A PATH TO SUBGOAL!!!!!")
+        
+            if dist_to_goal < self.rrt_params.termination_tolerance:
+                self.goal_node_idx = child_node.id
+                print("FOUND A PATH TO GOAL!!!!!")
+                break
+
+        pbar.close()
+
+        return time_to_dist_to_goal
+
+    def calc_du_star_towards_q_qp(self, parent_node: Node, q: np.ndarray):
+        prog = MathematicalProgram()
+        n_a = self.q_dynamics.dim_u
+        du = prog.NewContinuousVariables(n_a)
+        idx_obj = self.q_sim.get_q_u_indices_into_q()
+        idx_robot = self.q_sim.get_q_a_indices_into_q()
+        q_a_lb = self.q_lb[idx_robot]
+        q_a_ub = self.q_ub[idx_robot]
+        B_obj = parent_node.Bhat[idx_obj, :]
+
+        # We need |A * x - b| ^2 + epsilon * |x|^2, but MathematicalProgram
+        # requires every term in the quadratic cost to be PD.
+        Q = B_obj.T @ B_obj + 1e-2 * np.eye(n_a)
+        b = (q - parent_node.chat)[idx_obj]
+        b_combined = -B_obj.T @ b
+        prog.AddQuadraticCost(Q, b_combined, du)
+        prog.AddBoundingBoxConstraint(
+            -self.rrt_params.stepsize, self.rrt_params.stepsize, du
+        )
+        prog.AddBoundingBoxConstraint(
+            q_a_lb - parent_node.ubar, q_a_ub - parent_node.ubar, du
+        )
+
+        result = self.solver.Solve(prog)
+        if not result.is_success():
+            raise RuntimeError
+
+        du_star = result.GetSolution(du)
+        return du_star
+
+    def calc_du_star_towards_q_lstsq(self, parent_node: Node, q: np.ndarray):
+        # Compute least-squares solution.
+        # NOTE(terry-suh): it is important to only do this on the submatrix
+        # of B that has to do with u.
+
+        idx_obj = self.q_sim.get_q_u_indices_into_q()
+
+        du_star = np.linalg.lstsq(
+            parent_node.Bhat[idx_obj, :],
+            (q - parent_node.chat)[idx_obj],
+            rcond=None,
+        )[0]
+
+        # Normalize least-squares solution.
+        du_norm = np.linalg.norm(du_star)
+        step_size = min(du_norm, self.rrt_params.stepsize)
+        du_star = du_star / du_norm
+        u_star = parent_node.ubar + step_size * du_star
+
+        if self.rrt_params.enforce_robot_joint_limits:
+            idx_robot = self.q_sim.get_q_a_indices_into_q()
+            q_a_lb = self.q_lb[idx_robot]
+            q_a_ub = self.q_ub[idx_robot]
+            u_star = np.clip(u_star, q_a_lb, q_a_ub)
+
+        return u_star - parent_node.ubar
+    
+    def calc_du_star_towards_q_diff(self, parent_node: Node, q: np.ndarray):
+        idxs_a = self.q_sim.get_q_a_indices_into_q()
+        du_star = q[idxs_a] - parent_node.q[idxs_a]
+        
+        du_norm = np.linalg.norm(du_star)
+        step_size = min(du_norm, self.rrt_params.stepsize)
+        du_star = du_star * step_size / du_norm
+
+        return du_star
+
+    def calc_du_star_towards_q_constrained_lstsq(self, parent_node: Node, q: np.ndarray):
+        """
+        Solve min ||Ax - b|| subject to ||x|| <= d.
+        """
+        tol = 1e-10
+        max_iter = 100
+
+        A = parent_node.Bhat_u
+        b = (q[self.q_u_indices_into_x] - parent_node.chat_u)
+
+        AtA = A.T @ A
+        Atb = A.T @ b
+
+        try:
+            # Unconstrained LS solution
+            x0 = np.linalg.solve(AtA, Atb)
+            if np.linalg.norm(x0) <= self.rrt_params.stepsize:
+                return x0  # constraint inactive
+        except:
+            pass
+                
+        lam_low, lam_high = 0, 1.0
+        
+        # Increase lam_high until norm(x) < stepsize
+        for _ in range(50):
+            x = np.linalg.solve(AtA + lam_high * np.eye(A.shape[1]), Atb)
+            if np.linalg.norm(x) < self.rrt_params.stepsize:
+                break
+            lam_high *= 2
+        
+        # Binary search λ
+        for _ in range(max_iter):
+            lam = 0.5 * (lam_low + lam_high)
+            x = np.linalg.solve(AtA + lam * np.eye(A.shape[1]), Atb)
+            
+            if np.linalg.norm(x) > self.rrt_params.stepsize:
+                lam_low = lam
+            else:
+                lam_high = lam
+            
+            if lam_high - lam_low < tol:
+                break
+            
+        return x 
+
+
+    def sample_contact(self, parent_node: Node):
+        """
+        Sample contact and return a new node
+        """
+        assert parent_node.is_static
+
+        x_next = self.contact_sampler.sample_contact(parent_node.q)
+
+        child_node = IrsTrajectoryNode(x_next)
+
+        child_node.contact_mode_id = self.next_contact_id
+        self.next_contact_id += 1
+
+        child_node.is_static = True
+        child_node.t, child_node.distance_from_traj = self.closest_t_in_trajectory(x_next[self.q_u_indices_into_x])
+
+        edge = IrsEdge()
+        edge.parent = parent_node
+        edge.child = child_node
+        edge.cost = 1.0
+
+        edge.du = np.nan
+        edge.u = np.nan
+
+        return child_node, edge
+
+    def extend_towards_q(self, parent_node: Node, q: np.array):
+        """
+        Extend towards a specified configuration q and return a new
+        node,
+        """
+        if self.rrt_params.du_star_mode == DuStarMode.EEFDiff:
+            du_star = self.calc_du_star_towards_q_diff(parent_node, q)
+        elif self.rrt_params.du_star_mode == DuStarMode.LSTSQ:
+            du_star = self.calc_du_star_towards_q_lstsq(parent_node, q)
+        elif self.rrt_params.du_star_mode == DuStarMode.ConstrainedLSTSQ:
+            du_star = self.calc_du_star_towards_q_constrained_lstsq(parent_node, q)
+        elif self.rrt_params.du_star_mode == DuStarMode.QP:
+            du_star = self.calc_du_star_towards_q_qp(parent_node, q)
+        else:
+            raise Exception(f"Unknown du_star_mode {self.rrt_params.du_star_mode}")
+        u_star = parent_node.ubar + du_star
+
+        u_star, _ = self.rrt_params.robot_state_clamp_func(u_star)
+    
+        x_next = self.q_sim.calc_dynamics(
+            parent_node.q, u_star, self.sim_params
+        )
+
+        x_next = self.step_in(x_next)
+
+        cost = 0.0
+
+        child_node = IrsTrajectoryNode(x_next)
+        child_node.subgoal = q
+        child_node.contact_mode_id = parent_node.contact_mode_id
+        child_node.is_static = self.is_static(x_next)
+
+        child_node.t, child_node.distance_from_traj = self.closest_t_in_trajectory(x_next[self.q_u_indices_into_x])
+
+        edge = IrsEdge()
+        edge.parent = parent_node
+        edge.child = child_node
+        edge.cost = cost
+
+        edge.du = du_star
+        edge.u = u_star
+
+        return child_node, edge
+    

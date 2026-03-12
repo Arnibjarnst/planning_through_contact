@@ -1,0 +1,16 @@
+
+Gurobi 9.5.2 (linux64, gurobi_cl) logging started Mon Dec  1 10:19:21 2025
+
+Set parameter Username
+Set parameter LicenseID
+Set parameter LogFile to value "gurobi.log"
+Academic license - for non-commercial use only - expires 2026-11-28
+Using license file /home/arni/gurobi.lic
+
+Gurobi 9.5.2 (linux64, gurobi_cl) logging started Mon Dec  1 10:25:57 2025
+
+Set parameter Username
+Set parameter LicenseID
+Set parameter LogFile to value "gurobi.log"
+Academic license - for non-commercial use only - expires 2026-11-28
+Using license file /home/arni/gurobi.lic

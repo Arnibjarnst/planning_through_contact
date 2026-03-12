@@ -1,0 +1,86 @@
+{
+    "normal": {
+        "dt": [
+            0.45143010999890976,
+            0.16916344400669914
+        ],
+        "success": [
+            false,
+            false
+        ],
+        "mean_dt": 0.31029677700280445,
+        "mean_success": 0.0
+    },
+    "batch=1": {
+        "dt": [
+            0.6088389039941831,
+            0.23995550800464116
+        ],
+        "success": [
+            false,
+            false
+        ],
+        "mean_dt": 0.4243972059994121,
+        "mean_success": 0.0
+    },
+    "lstsq": {
+        "dt": [
+            0.4918888859974686,
+            0.5434227799996734
+        ],
+        "success": [
+            false,
+            false
+        ],
+        "mean_dt": 0.517655832998571,
+        "mean_success": 0.0
+    },
+    "reachability regrasp": {
+        "dt": [
+            0.5177278240007581,
+            0.16022043098928407
+        ],
+        "success": [
+            false,
+            false
+        ],
+        "mean_dt": 0.3389741274950211,
+        "mean_success": 0.0
+    },
+    "connect from anywhere": {
+        "dt": [
+            0.47223469700838905,
+            0.21172911699977703
+        ],
+        "success": [
+            false,
+            false
+        ],
+        "mean_dt": 0.34198190700408304,
+        "mean_success": 0.0
+    },
+    "connect to anywhere": {
+        "dt": [
+            0.45251902801101096,
+            0.16265485700569116
+        ],
+        "success": [
+            false,
+            false
+        ],
+        "mean_dt": 0.30758694250835106,
+        "mean_success": 0.0
+    },
+    "no trajectory noise": {
+        "dt": [
+            0.4731623569969088,
+            0.19192892100545578
+        ],
+        "success": [
+            false,
+            false
+        ],
+        "mean_dt": 0.3325456390011823,
+        "mean_success": 0.0
+    }
+}

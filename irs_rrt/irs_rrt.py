@@ -20,7 +20,7 @@ from irs_mpc2.irs_mpc_params import (
 )
 
 from qsim.simulator import QuasistaticSimulator, InternalVisualizationType
-from qsim_cpp import QuasistaticSimulatorCpp
+from qsim_cpp import QuasistaticSimulatorCpp, ForwardDynamicsMode
 from qsim.parser import QuasistaticParser
 from qsim.model_paths import package_paths_dict
 
@@ -69,9 +69,11 @@ class IrsRrt(Rrt):
         rrt_params: IrsRrtParams,
         q_sim: QuasistaticSimulatorCpp,
         q_sim_py: QuasistaticSimulator,
+        q_sim_smooth: QuasistaticSimulatorCpp
     ):
         self.q_sim = q_sim
         self.plant = q_sim.get_plant()
+        self.py_plant = q_sim_py.get_plant()
         self.q_sim_py = q_sim_py
         # q_sim_py must have an internal MeshcatVisualizer.
         assert q_sim_py.internal_vis
@@ -82,16 +84,23 @@ class IrsRrt(Rrt):
         self.sim_params.log_barrier_weight = (
             rrt_params.log_barrier_weight_for_bundling
         )
-        self.sim_params.forward_mode = kSmoothingMode2ForwardDynamicsModeMap[
-            rrt_params.smoothing_mode
-        ]
+        # self.sim_params.forward_mode = kSmoothingMode2ForwardDynamicsModeMap[
+        #     rrt_params.smoothing_mode
+        # ]
+        self.sim_params.forward_mode = ForwardDynamicsMode.kSocpMp
         self.sim_params.use_free_solvers = rrt_params.use_free_solvers
 
         # TODO(pang): what does self.load_params() do?
         self.rrt_params = self.load_joint_limits_dict(rrt_params)
-        self.reachable_set = ReachableSet(
-            q_sim=q_sim, rrt_params=rrt_params, sim_params=self.sim_params
-        )
+
+        if q_sim_smooth is not None:
+            self.reachable_set = ReachableSet(
+                q_sim=q_sim_smooth, rrt_params=rrt_params, sim_params=self.sim_params
+            )
+        else:
+            self.reachable_set = ReachableSet(
+                q_sim=q_sim, rrt_params=rrt_params, sim_params=self.sim_params
+            )
         self.max_size = rrt_params.max_size
 
         self.dim_x = self.plant.num_positions()
@@ -112,6 +121,15 @@ class IrsRrt(Rrt):
         self.q_u_indices_into_x = self.q_sim.get_q_u_indices_into_q()
         self.q_a_indices_into_x = self.q_sim.get_q_a_indices_into_q()
 
+        self.obj_dims = self.rrt_params.obj_dims
+        obj_dims_half = self.obj_dims / 2
+        self.obj_corners = np.array([
+            [x, y, z]
+            for x in (-obj_dims_half[0], obj_dims_half[0])
+            for y in (-obj_dims_half[1], obj_dims_half[1])
+            for z in (-obj_dims_half[2], obj_dims_half[2])
+        ])
+        
         self.calc_q_u_diff = self.get_calc_q_u_diff()
 
         super().__init__(rrt_params)
@@ -144,19 +162,14 @@ class IrsRrt(Rrt):
         """
         joint_limit_ub = {}
         joint_limit_lb = {}
-        robot_joint_limits = self.q_sim.get_actuated_joint_limits()
 
         for model in self.q_sim.get_unactuated_models():
             joint_limit_lb[model] = self.rrt_params.joint_limits[model][:, 0]
             joint_limit_ub[model] = self.rrt_params.joint_limits[model][:, 1]
 
-        for model, limits in robot_joint_limits.items():
-            lower = limits["lower"]
-            upper = limits["upper"]
-            mid = (lower + upper) / 2
-            range = (upper - lower) * (1 - padding)
-            joint_limit_lb[model] = mid - range / 2
-            joint_limit_ub[model] = mid + range / 2
+        for model in self.q_sim.get_actuated_models():
+            joint_limit_lb[model] = self.rrt_params.joint_limits[model][:, 0]
+            joint_limit_ub[model] = self.rrt_params.joint_limits[model][:, 1]
 
         q_lb = self.q_sim.get_q_vec_from_dict(joint_limit_lb)
         q_ub = self.q_sim.get_q_vec_from_dict(joint_limit_ub)
@@ -167,7 +180,7 @@ class IrsRrt(Rrt):
         Given a node which has a q, this method populates the rest of the
         node parameters using reachable set computations.
         """
-        node.ubar = node.q[self.q_sim.get_q_a_indices_into_q()]
+        node.ubar = node.q[self.q_a_indices_into_x]
 
         # For q_u and q_a.
         if self.rrt_params.smoothing_mode in kNoSmoothingModes:
@@ -205,6 +218,50 @@ class IrsRrt(Rrt):
         ) = self.reachable_set.calc_unactuated_metric_parameters(Bhat, chat)
         node.covinv_u = np.linalg.inv(node.cov_u)
 
+    def populate_node_parameters_batched(self, nodes: np.ndarray[IrsNode]):
+        """
+        Given nodes which have a q, this method populates the rest of the
+        node parameters using reachable set computations.
+
+        Returns a boolean array where entries tell whether the corresponding
+        node was successfully added to the graph
+        """
+        for node in nodes:
+            node.ubar = node.q[self.q_a_indices_into_x]
+
+        qs = np.array([node.q for node in nodes])
+        ubars = np.array([node.ubar for node in nodes])
+
+        # For q_u and q_a.
+        if self.rrt_params.smoothing_mode in kAnalyticSmoothingModes:
+            Bhats, chats, is_valid = self.reachable_set.calc_bundled_Bc_analytic_batch(qs, ubars)
+        else:
+            raise NotImplementedError(
+                f"{self.rrt_params.smoothing_mode} is not supported."
+            )
+
+        for i, node in enumerate(nodes):
+            if not is_valid[i]:
+                continue
+
+            node.Bhat = Bhats[i]
+            node.chat = chats[i]
+            node.cov, node.mu = self.reachable_set.calc_metric_parameters(
+                node.Bhat, node.chat
+            )
+            node.covinv = np.linalg.inv(node.cov)
+
+            # For q_u only.
+            node.Bhat_u = node.Bhat[self.q_u_indices_into_x, :]
+            node.chat_u = node.chat[self.q_u_indices_into_x]
+            (
+                node.cov_u,
+                node.mu_u,
+            ) = self.reachable_set.calc_unactuated_metric_parameters(node.Bhat, node.chat)
+            node.covinv_u = np.linalg.inv(node.cov_u)
+
+        return np.array(is_valid)
+
     def get_Bhat_tensor_up_to(self, n_nodes: int):
         return self.Bhat_tensor[:n_nodes]
 
@@ -235,6 +292,33 @@ class IrsRrt(Rrt):
         self.covinv_tensor[node.id] = node.covinv
         self.chat_matrix[node.id] = node.chat
         self.covinv_u_tensor[node.id] = node.covinv_u
+
+    def add_nodes(self, nodes: np.ndarray[IrsNode], draw_first_node: bool = False):
+        if len(nodes) == 0:
+            return np.array([], dtype=bool)
+        
+        if draw_first_node:
+            self.q_sim_py.update_mbp_positions_from_vector(nodes[0].q)
+            self.q_sim_py.draw_current_configuration()
+        is_valid = self.populate_node_parameters_batched(nodes)  # exception may be thrown here.
+
+        nodes = nodes[is_valid]
+
+        # No need to parallelize
+        for node in nodes:
+            super().add_node(node)
+            # In addition to the add_node operation, we'll have to add the
+            # B and c matrices of the node into our batch tensor.
+
+            # Note we use self.size-1 here since the parent method increments
+            # size by 1.
+
+            self.Bhat_tensor[node.id] = node.Bhat
+            self.covinv_tensor[node.id] = node.covinv
+            self.chat_matrix[node.id] = node.chat
+            self.covinv_u_tensor[node.id] = node.covinv_u
+
+        return is_valid
 
     def sample_subgoal(self):
         """
@@ -274,6 +358,19 @@ class IrsRrt(Rrt):
 
         return child_node, edge
 
+    def is_static(self, q):
+        # move object in xy plane away from robot
+        q_temp = np.copy(q)
+        q_temp[self.q_u_indices_into_x[4]] = 3
+
+        # Simulate one step
+        qnext = self.q_sim.calc_dynamics(q_temp, q_temp[self.q_a_indices_into_x], self.sim_params)
+        obj_pose_next = qnext[self.q_u_indices_into_x]
+
+        angleDiff, posDiff = self.calc_q_u_diff(q_temp[self.q_u_indices_into_x], obj_pose_next)
+
+        return angleDiff < self.rrt_params.max_static_angle_diff and posDiff < self.rrt_params.max_static_pos_diff
+
     def calc_distance_batch_local(
         self, q_query: np.ndarray, n_nodes: int, is_q_u_only: bool
     ):
@@ -310,6 +407,33 @@ class IrsRrt(Rrt):
         int_batch = np.einsum("Bij,NBi -> NBj", covinv_tensor, error_batch)
         metric_batch = np.einsum("NBi,NBi -> NB", int_batch, error_batch)
         return metric_batch
+
+    def calc_distance_batch_corners(
+        self, pose_query: np.ndarray, pose_batch: np.ndarray
+    ):
+        N = pose_batch.shape[0]
+
+        quat_batch = pose_batch[:, :4]
+        t_batch = pose_batch[:, 4:]
+
+        R_batch = np.empty((N, 3, 3))
+        for i in range(N):
+            R_batch[i] = Quaternion(quat_batch[i]).rotation()
+
+        quat_query = pose_query[:4]
+        t_query= pose_query[4:]
+        R_query = Quaternion(quat_query).rotation()
+
+        corners_batch = (
+            R_batch @ self.obj_corners.T
+        ).transpose(0,2,1) + t_batch[:, None, :]
+
+        corners_query = (R_query @ self.obj_corners.T).T + t_query
+
+        diffs = corners_batch - corners_query
+        corner_error = np.sum(np.linalg.norm(diffs, axis=2), axis=1)   # (N,8)
+
+        return corner_error
 
     def calc_distance_batch_global(
         self, q_query: np.ndarray, n_nodes: int, is_q_u_only: bool
@@ -409,6 +533,7 @@ class IrsRrt(Rrt):
             rrt_params=rrt_param,
             q_sim=parser.make_simulator_cpp(),
             q_sim_py=parser.make_simulator_py(internal_vis=internal_vis),
+            q_sim_smooth=None,
         )
         prob_rrt.graph = tree
         prob_rrt.size = tree.number_of_nodes()

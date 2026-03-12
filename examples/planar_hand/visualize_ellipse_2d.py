@@ -21,6 +21,10 @@ from irs_rrt.irs_rrt import IrsRrt, IrsNode
 from irs_rrt.rrt_params import IrsRrtParams
 from irs_rrt.irs_rrt_projection import IrsRrtProjection
 
+from irs_mpc2.quasistatic_visualizer import (
+    InternalVisualizationType
+)
+
 from planar_hand_setup import *
 
 parser = argparse.ArgumentParser()
@@ -32,7 +36,7 @@ args = parser.parse_args()
 with open(args.tree_file_path, "rb") as f:
     tree = pickle.load(f)
 
-irs_rrt = IrsRrt.make_from_pickled_tree(tree)
+irs_rrt = IrsRrt.make_from_pickled_tree(tree, internal_vis=InternalVisualizationType.Cpp)
 q_dynamics = irs_rrt.q_dynamics
 q_sim_py = q_dynamics.q_sim_py
 n_nodes = len(tree.nodes)

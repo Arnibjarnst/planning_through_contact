@@ -29,7 +29,7 @@ pickled_tree_path = os.path.join(
     "..",
     "examples",
     "planar_hand",
-    "planar_hand_tree_2000_0.pkl",
+    "planar_hand_tree_1000_0.pkl",
 )
 
 with open(pickled_tree_path, 'rb') as f:

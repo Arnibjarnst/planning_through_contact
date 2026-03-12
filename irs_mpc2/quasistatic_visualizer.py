@@ -4,8 +4,9 @@ from typing import Dict, Set, List
 
 from matplotlib import cm
 import numpy as np
-from pydrake.all import ModelInstanceIndex, MultibodyPlant, RigidTransform
-from pydrake.all import PiecewisePolynomial, ContactResults, BodyIndex
+from pydrake.all import ModelInstanceIndex, MultibodyPlant, RigidTransform, Quaternion
+from pydrake.all import PiecewisePolynomial, ContactResults, BodyIndex, AbstractValue
+from pydrake.geometry import Cylinder, Meshcat, MeshcatVisualizer, Rgba, Sphere
 
 from manipulation.meshcat_utils import AddMeshcatTriad
 
@@ -38,10 +39,10 @@ class QuasistaticVisualizer:
 
     @staticmethod
     def make_visualizer(q_parser: QuasistaticParser):
-        q_sim = q_parser.make_simulator_cpp()
         q_sim_py = q_parser.make_simulator_py(
             internal_vis=InternalVisualizationType.Cpp
         )
+        q_sim = q_parser.make_simulator_cpp()
         return QuasistaticVisualizer(q_sim, q_sim_py)
 
     def get_body_id_to_meshcat_name_map(self):
@@ -79,9 +80,9 @@ class QuasistaticVisualizer:
             idx_b = velocity_indices_b[model]
             assert idx_a == idx_b
 
-    def draw_configuration(self, q: np.ndarray):
+    def draw_configuration(self, q: np.ndarray, draw_forces: bool = False):
         self.q_sim_py.update_mbp_positions_from_vector(q)
-        self.q_sim_py.draw_current_configuration()
+        self.q_sim_py.draw_current_configuration(draw_forces)
 
     def draw_goal_triad(
         self,
@@ -138,13 +139,32 @@ class QuasistaticVisualizer:
                 opacity=opacity,
             )
 
-    def publish_trajectory(self, x_knots: np.ndarray, h: float):
+    def publish_trajectory(self, x_knots: np.ndarray, h: float, contact_results_list = None):
+        assert contact_results_list is None or len(contact_results_list) == len(x_knots)
         if self.q_sim_py.internal_vis == InternalVisualizationType.Cpp:
             self.meshcat_vis.DeleteRecording()
             self.meshcat_vis.StartRecording(False)
             for i, t in enumerate(np.arange(len(x_knots)) * h):
                 self.q_sim_py.context.SetTime(t)
-                self.q_sim_py.update_mbp_positions_from_vector(x_knots[i])
+                # self.q_sim_py.update_mbp_positions_from_vector(x_knots[i])
+                if contact_results_list is not None:
+                    for j in range(contact_results_list[i].num_point_pair_contacts()):
+                        path = f"contacts/{i}/{j}"
+                        cj = contact_results_list[i].point_pair_contact_info(j)
+                        f_origin = cj.contact_point()
+                        f_W = cj.contact_force()
+                        f_W_norm = np.linalg.norm(f_W)
+
+                        if f_W_norm < 1e-3:
+                            continue
+
+                        self.q_sim_py.meshcat.SetTransform(path, RigidTransform(Quaternion(1,0,0,0), f_origin))
+
+                        self.q_sim_py.meshcat.SetObject(
+                            path + "/arrow", Cylinder(0.01, f_W_norm / 100.0), Rgba(1, 0, 0, 1.0)
+                        )
+                self.draw_configuration(x_knots[i], False)
+
                 self.meshcat_vis.ForcedPublish(self.q_sim_py.context_meshcat)
 
             self.meshcat_vis.StopRecording()

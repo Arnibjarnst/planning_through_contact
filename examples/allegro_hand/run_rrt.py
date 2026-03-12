@@ -96,7 +96,7 @@ rrt_params.quat_metric = 5
 rrt_params.distance_threshold = np.inf
 rrt_params.stepsize = 0.2
 rrt_params.std_u = 0.1
-rrt_params.grasp_prob = 0.2
+rrt_params.grasp_prob = 0.9
 rrt_params.h = 0.1
 
 # %% use free solvers?

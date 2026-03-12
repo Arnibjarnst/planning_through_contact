@@ -11,3 +11,4 @@
 *.npy
 *.pkl
 lcmlog*
+.aider*

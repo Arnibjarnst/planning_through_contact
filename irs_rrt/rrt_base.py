@@ -75,6 +75,15 @@ class Rrt:
         """Return edge from the graph given id of parent and child."""
         edge = self.graph.edges[parent_id, child_id]["edge"]
         return edge
+    
+    def get_parent_from_child(self, child_node: Node):
+        child_id = child_node.id
+        i_parents = list(self.graph.predecessors(child_id))
+        assert len(i_parents) <= 1
+        if len(i_parents) == 0:
+            return None
+        parent_id = i_parents[0]
+        return self.get_node_from_id(parent_id)
 
     def get_q_matrix_up_to(self, size: int = None):
         """Get slice of q matrix with valid components."""
@@ -173,6 +182,13 @@ class Rrt:
         local distances from all the existing nodes in the tree to q_query.
         """
         raise NotImplementedError("This method is virtual.")
+    
+    def dist_to_goal(self):
+        """
+        Evaluate termination criteria for RRT using global distance metric.
+        """
+        dist_batch = self.calc_distance_batch(self.rrt_params.goal)
+        return np.min(dist_batch)
 
     def is_close_to_goal(self):
         """

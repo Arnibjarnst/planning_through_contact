@@ -1,6 +1,18 @@
 import numpy as np
 from irs_mpc2.irs_mpc_params import SmoothingMode
 
+import enum
+
+class DuStarMode(enum.Enum):
+    LSTSQ = enum.auto()
+    ConstrainedLSTSQ = enum.auto()
+    EEFDiff = enum.auto()
+    QP = enum.auto()
+
+class DistanceMetric(enum.Enum):
+    Mahalabonis = enum.auto()
+    Corner = enum.auto()
+
 
 class RrtParams:
     """
@@ -27,6 +39,9 @@ class RrtParams:
         #  the results in the TR-O paper. But it should be set to True for
         #  hardware demos, such as the iiwa_bimanual example.
         self.enforce_robot_joint_limits = False
+        
+        # returns the clamped state + boolean wether clamping was done or not
+        self.robot_state_clamp_func = lambda x: x, False
 
 
 class IrsRrtParams(RrtParams):
@@ -65,6 +80,19 @@ class IrsRrtParams(RrtParams):
         # used anywhere.
         self.use_free_solvers = False
 
+        # du_start calculation method
+        self.du_star_mode: DuStarMode = DuStarMode.LSTSQ
+
+        # static threshold
+        # object is considered static if angle diff and position diff is
+        # less than these thresholds under no external eef forces
+        # Note this parameter is highly dependent on self.h, mass and other factors
+        self.max_static_angle_diff = 0.01
+        self.max_static_pos_diff = 0.02
+
+        self.obj_dims = None
+
+
 
 class IrsRrtProjectionParams(IrsRrtParams):
     def __init__(self, q_model_path, joint_limits):
@@ -73,3 +101,25 @@ class IrsRrtProjectionParams(IrsRrtParams):
         # distance_threshold will be rejected.
         self.distance_threshold = np.inf
         self.grasp_prob = 0.2
+
+class IrsRrtTrajectoryParams(IrsRrtParams):
+    def __init__(self, q_model_path, joint_limits):
+        super().__init__(q_model_path, joint_limits)
+        # Subgoals further away from any node in the tree than
+        # distance_threshold will be rejected.
+        self.distance_threshold = np.inf
+        self.grasp_prob = 0.2
+
+        self.subgoal_ts = [0.0, 1.0]
+        self.subgoal_tolerance = 0.1
+
+        self.initial_contact_samples = 64
+        self.batch_size = 1
+
+        self.static_distance_metric = DistanceMetric.Corner
+
+        # Filter out higher t when finding closest nodes
+        self.connect_from_behind = True
+        # Filter out lower t when adding new nodes
+        self.connect_to_front = True
+
