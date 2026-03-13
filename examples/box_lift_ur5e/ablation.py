@@ -128,17 +128,19 @@ save_path = os.path.join(
     data_folder, f"ablation_{ts}.json"
 )
 
+def make_serializable(obj):
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, (enum.Enum, DuStarMode, DistanceMetric, SmoothingMode)):
+        return str(obj)
+    if isinstance(obj, dict):
+        return {str(k): make_serializable(v) for k, v in obj.items()}
+    if hasattr(obj, "__dict__"):
+        return {k: make_serializable(v) for k, v in vars(obj).items() if not k.startswith('_')}
+    return obj
+
 for trial_name, rrt_param_config in rrt_params_ablation.items():
-    serializable_params_dict = {
-        key: copy.deepcopy(value)
-        for key, value in vars(rrt_param_config).items()
-        if key != "joint_limits"
-    }
-    model_name_to_joint_limits_map = {
-        plant.GetModelInstanceName(model): copy.deepcopy(value)
-        for model, value in rrt_param_config.joint_limits.items()
-    }
-    serializable_params_dict["joint_limits"] = model_name_to_joint_limits_map
+    serializable_params_dict = make_serializable(rrt_param_config)
 
 
     if not trial_name in records:
