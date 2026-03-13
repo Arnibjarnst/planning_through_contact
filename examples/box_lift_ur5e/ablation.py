@@ -2,6 +2,7 @@ import time
 import copy
 from datetime import datetime
 import json
+import enum
 
 from irs_rrt.irs_rrt_trajectory import IrsRrtTrajectory
 from irs_rrt.rrt_params import DuStarMode, DistanceMetric
@@ -153,6 +154,10 @@ for trial_name, rrt_param_config in rrt_params_ablation.items():
             "mean_success": 0,
             "mean_success_t": 0,
         }
+
+    
+    with open(save_path, 'w') as fp:
+        json.dump(records, fp, indent=4)
 
 
     for seed in seeds:
