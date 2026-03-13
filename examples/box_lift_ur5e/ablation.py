@@ -135,6 +135,12 @@ def make_serializable(obj):
     if isinstance(obj, (enum.Enum, DuStarMode, DistanceMetric, SmoothingMode)):
         return str(obj)
     if isinstance(obj, dict):
+        # Special case for joint_limits which uses ModelInstanceIndex keys
+        if all(hasattr(k, "is_valid") for k in obj.keys()):
+            return {
+                plant.GetModelInstanceName(k): make_serializable(v)
+                for k, v in obj.items()
+            }
         return {str(k): make_serializable(v) for k, v in obj.items()}
     if hasattr(obj, "__dict__"):
         return {k: make_serializable(v) for k, v in vars(obj).items() if not k.startswith('_')}
