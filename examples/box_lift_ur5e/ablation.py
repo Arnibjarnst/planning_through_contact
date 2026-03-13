@@ -4,6 +4,7 @@ from datetime import datetime
 import json
 import enum
 
+from pydrake.all import ModelInstanceIndex
 from irs_rrt.irs_rrt_trajectory import IrsRrtTrajectory
 from irs_rrt.rrt_params import DuStarMode, DistanceMetric
 
@@ -136,7 +137,7 @@ def make_serializable(obj):
         return str(obj)
     if isinstance(obj, dict):
         # Special case for joint_limits which uses ModelInstanceIndex keys
-        if all(hasattr(k, "is_valid") for k in obj.keys()):
+        if all(isinstance(k, ModelInstanceIndex) for k in obj.keys()):
             return {
                 plant.GetModelInstanceName(k): make_serializable(v)
                 for k, v in obj.items()
