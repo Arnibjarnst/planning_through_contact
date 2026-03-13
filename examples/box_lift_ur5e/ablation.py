@@ -8,6 +8,12 @@ from irs_rrt.rrt_params import DuStarMode, DistanceMetric
 
 from box_lift_setup import *
 
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--continue_from", type=str, default=None)
+args = parser.parse_args()
+
 def run_trial(rrt_params, seed):
     np.random.seed(seed)
 
@@ -62,13 +68,26 @@ def safe_deepcopy(x):
     except:
         return x
 
-seeds = list(range(10))
+if args.continue_from is None:
+    records = {}
+    data_folder = "ablation_data/box_lift_ur5e"
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_path = os.path.join(
+        data_folder, f"ablation_batch_size_{ts}.json"
+    )
+else:
+    with open(args.continue_from) as fp:
+        records = json.load(fp)
+    save_path = args.continue_from
 
-rrt_params_no_batch = safe_deepcopy(rrt_params)
-rrt_params_no_batch.batch_size = 1
 
-rrt_params_lstsq = safe_deepcopy(rrt_params)
-rrt_params_lstsq.du_star_mode = DuStarMode.LSTSQ
+seeds = list(range(20))
+
+# rrt_params_no_batch = safe_deepcopy(rrt_params)
+# rrt_params_no_batch.batch_size = 1
+
+# rrt_params_lstsq = safe_deepcopy(rrt_params)
+# rrt_params_lstsq.du_star_mode = DuStarMode.LSTSQ
 
 rrt_params_no_corner_distance = safe_deepcopy(rrt_params)
 rrt_params_no_corner_distance.static_distance_metric = DistanceMetric.Mahalabonis
@@ -85,16 +104,20 @@ rrt_params_no_sample_noise.joint_limits[idx_u] = np.zeros((7,2))
 rrt_params_no_subgoals = safe_deepcopy(rrt_params)
 rrt_params_no_subgoals.subgoal_ts = [0.0, 1.0]
 
+rrt_params_no_step_in = safe_deepcopy(rrt_params)
+rrt_params_no_step_in.step_in = False
+
 
 rrt_params_ablation = {
     "normal": rrt_params,
-    "batch=1": rrt_params_no_batch,
-    "lstsq": rrt_params_lstsq,
+    # "batch=1": rrt_params_no_batch,
+    # "lstsq": rrt_params_lstsq,
     "reachability regrasp": rrt_params_no_corner_distance,
     "connect from anywhere": rrt_params_no_connect_from_behind,
     "connect to anywhere": rrt_params_no_connect_to_front,
     "no trajectory noise": rrt_params_no_sample_noise,
     "no subgoals": rrt_params_no_subgoals,
+    "no step in": rrt_params_no_step_in,
 }
 
 records = {}
@@ -106,26 +129,43 @@ save_path = os.path.join(
 )
 
 for trial_name, rrt_param_config in rrt_params_ablation.items():
-    record = {
-        "dt": [],
-        "success": [],
-        "mean_dt": 0,
-        "mean_success": 0,
+    serializable_params_dict = {
+        key: copy.deepcopy(value)
+        for key, value in vars(rrt_param_config).items()
+        if key != "joint_limits"
     }
+    model_name_to_joint_limits_map = {
+        plant.GetModelInstanceName(model): copy.deepcopy(value)
+        for model, value in rrt_param_config.joint_limits.items()
+    }
+    serializable_params_dict["joint_limits"] = model_name_to_joint_limits_map
+
+
+    if not trial_name in records:
+        records[trial_name] = {
+            "params": serializable_params_dict,
+            "seeds": [],
+            "t": [],
+            "success": [],
+            "mean_t": 0,
+            "mean_success": 0,
+            "mean_success_t": 0,
+        }
+
 
     for seed in seeds:
-        dt, success = run_trial(rrt_param_config, seed)
-        record["t"].append(dt)
-        record["success"].append(success)
+        t, success = run_trial(rrt_param_config, seed)
 
-        t_array = np.array(record["t"])
-        success_array = np.array(record["success"])
+        records[trial_name]["seeds"].append(seed)
+        records[trial_name]["t"].append(t)
+        records[trial_name]["success"].append(success)
 
-        record["mean_t"] = t_array.mean()
-        record["mean_success"] = success_array.mean()
-        records["mean_success_t"] = t_array[success_array].mean()
+        t_array = np.array(records[trial_name]["t"])
+        success_array = np.array(records[trial_name]["success"])
 
-        records[trial_name] = record
+        records[trial_name]["mean_t"] = t_array.mean()
+        records[trial_name]["mean_success"] = success_array.mean()
+        records[trial_name]["mean_success_t"] = t_array[success_array].mean()
 
         with open(save_path, 'w') as fp:
             json.dump(records, fp, indent=4)
