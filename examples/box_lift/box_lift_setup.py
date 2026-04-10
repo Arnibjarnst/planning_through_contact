@@ -167,32 +167,6 @@ rrt_params.obj_dims = object_dims
 rrt_params.use_free_solvers = False
 
 
-def robot_state_clamp(q_a):
-    q_a_l = q_a[idx_q_a_l]
-    q_a_r = q_a[idx_q_a_r]
-
-    dq_a_l = q_a_l - arm_l_pose[4:]
-    dq_a_r = q_a_r - arm_r_pose[4:]
-
-    dist_l = np.linalg.norm(dq_a_l) 
-    dist_r = np.linalg.norm(dq_a_r)
-
-    factor_l = min(dist_l, arm_reach) / dist_l
-    factor_r = min(dist_r, arm_reach) / dist_r
-
-    clamped_q_a_l = arm_l_pose[4:] + factor_l * dq_a_l
-    clamped_q_a_r = arm_r_pose[4:] + factor_r * dq_a_r
-    clamped_q_a = np.zeros(6)
-    clamped_q_a[idx_q_a_l] = clamped_q_a_l
-    clamped_q_a[idx_q_a_r] = clamped_q_a_r
-    clamped = factor_l < 1.0 or factor_r < 1.0
-
-    return clamped_q_a, clamped
-
-
-rrt_params.robot_state_clamp_func = robot_state_clamp
-
-
 class MagicContactSampler(ContactSampler):
     def __init__(self):
         super().__init__(q_sim, q_sim_py)

@@ -12,6 +12,8 @@ from irs_rrt.irs_rrt import IrsRrt, IrsNode, IrsEdge
 from irs_rrt.rrt_base import Node
 from irs_rrt.rrt_params import DuStarMode, DistanceMetric, IrsRrtTrajectoryParams
 
+from scripts import utils
+
 # For prettier tqdm bar in jupyter notebooks.
 from tqdm import tqdm
 
@@ -68,17 +70,32 @@ class IrsRrtTrajectory(IrsRrt):
         self.max_static_t = 0
 
         self.idx_u = self.py_plant.GetModelInstanceByName("box")
-        possible_names = [["ur5_l", "ur5_r"], ["ur5e_l", "ur5e_r"], ["finger_left", "finger_rigth"]]
-        for names in possible_names:
-            try:
-                self.idx_a_l = self.py_plant.GetModelInstanceByName(names[0])
-                self.idx_a_r = self.py_plant.GetModelInstanceByName(names[1])
-                break
-            except:
-                continue
 
-        self.idx_q_a_l = self.q_a_indices_into_x[:len(self.q_a_indices_into_x)//2]
-        self.idx_q_a_r = self.q_a_indices_into_x[len(self.q_a_indices_into_x)//2:]
+        # Detect arms dynamically from actuated models
+        actuated_models = list(q_sim.get_actuated_models())
+        n_arms = len(actuated_models)
+        joints_per_arm = len(self.q_a_indices_into_x) // n_arms
+
+        self.arms = []
+        for i, model in enumerate(actuated_models):
+            model_name = self.py_plant.GetModelInstanceName(model)
+            start_idx = i * joints_per_arm
+            end_idx = (i + 1) * joints_per_arm
+            arm_pose = rrt_params.arm_poses.get(
+                model_name, np.array([1, 0, 0, 0, 0, 0, 0])
+            )
+            self.arms.append({
+                'model_idx': model,
+                'joint_indices': self.q_a_indices_into_x[start_idx:end_idx],
+                'arm_pose': arm_pose,
+            })
+
+        # Backwards compat for bimanual code
+        if n_arms >= 2:
+            self.idx_a_l = self.arms[0]['model_idx']
+            self.idx_a_r = self.arms[1]['model_idx']
+            self.idx_q_a_l = self.arms[0]['joint_indices']
+            self.idx_q_a_r = self.arms[1]['joint_indices']
 
     def sample_subgoal(self):
         """
@@ -213,89 +230,98 @@ class IrsRrtTrajectory(IrsRrt):
         q_pose = q[self.q_u_indices_into_x]
         return np.min(self.calc_distance_batch_corners(q_pose, pose_batch))
     
+    def cast_to_cone(self, joints, normal, arm_pose, deg):
+        rad = np.deg2rad(deg)
+        eef_offset = self.rrt_params.eef_offset
+
+        ee_pose = utils.get_ee_pose(joints, arm_pose, eef_offset=eef_offset)
+        ee_dir = utils.quat_apply(ee_pose[:4], np.array([0,0,1]))
+        dot = np.dot(ee_dir, -normal)
+        theta = np.arccos(dot)
+
+        if theta <= rad:
+            return joints
+
+        tilt_axis = np.cross(-normal, ee_dir)
+        tilt_axis /= np.linalg.norm(tilt_axis)
+        ee_quat = Quaternion(ee_pose[:4])
+
+        d_theta = rad - theta
+        q_correction = AngleAxis(d_theta, tilt_axis).quaternion()
+        ee_quat_new: Quaternion = q_correction.multiply(ee_quat)
+
+        ee_pose_new = np.concatenate([ee_quat_new.wxyz(), ee_pose[4:]])
+
+        # TODO: get all configurations and filter
+        joints_new = utils.get_joints(ee_pose_new, arm_pose, joints, robot='ur5e', eef_offset=eef_offset)
+
+        return joints_new
+    
     def step_in(self, q):
         """
         Given a near-contact configuration, give a q that steps in contact.
+        Works with any number of arms.
         """
         self.q_sim_py.update_mbp_positions_from_vector(q)
 
         sg = self.q_sim_py.get_scene_graph()
         query_object = sg.GetOutputPort("query").Eval(self.q_sim_py.context_sg)
         collision_pairs = query_object.ComputeSignedDistancePairwiseClosestPoints(
-            0.05
+            0.02
         )
 
         inspector = query_object.inspector()
 
-        # 1. Compute closest distance pairs and normals.
-        min_dist_left = np.inf
-        min_dist_right = np.inf
-
-        min_body_left = None
-        min_body_right = None
-        min_normal_left = None
-        min_normal_right = None
-
-        for collision in collision_pairs:
-            f_id = inspector.GetFrameId(collision.id_A)
-            body_A = self.py_plant.GetBodyFromFrameId(f_id)
-            f_id = inspector.GetFrameId(collision.id_B)
-            body_B = self.py_plant.GetBodyFromFrameId(f_id)
-
-            # We only care about collisions with the box
-            if body_A.model_instance() != self.idx_u and body_B.model_instance() != self.idx_u:
-                continue
-
-            # left ee collision
-            if (body_A.model_instance() == self.idx_a_l) or (body_B.model_instance() == self.idx_a_l):
-                if collision.distance < min_dist_left:
-                    min_dist_left = collision.distance
-                    min_body_left = body_A if body_A.model_instance() == self.idx_a_l else body_B
-                    normal_sign = 1 if body_A.model_instance() == self.idx_a_r else -1
-                    min_normal_left = normal_sign * collision.nhat_BA_W
-
-            # right ee collision
-            if (body_A.model_instance() == self.idx_a_r) or (body_B.model_instance() == self.idx_a_r):
-                if collision.distance < min_dist_right:
-                    min_dist_right = collision.distance
-                    min_body_right = body_A if body_A.model_instance() == self.idx_a_r else body_B
-                    normal_sign = 1 if body_A.model_instance() == self.idx_a_r else -1
-                    min_normal_right = normal_sign * collision.nhat_BA_W
-
         q_next = np.copy(q)
 
-        if min_body_left:
-            # 2. Compute Jacobians and qdot.
-            J_L = self.py_plant.CalcJacobianTranslationalVelocity(
-                self.q_sim_py.context_plant,
-                JacobianWrtVariable.kV,
-                min_body_left.body_frame(),
-                np.array([0, 0, 0]),
-                self.py_plant.world_frame(),
-                self.py_plant.world_frame(),
-            )
+        for arm in self.arms:
+            model_idx = arm['model_idx']
+            joint_indices = arm['joint_indices']
+            arm_pose = arm['arm_pose']
 
-            J_La = J_L[:2, self.idx_q_a_l]
+            # Find closest collision between this arm and the box
+            min_dist = np.inf
+            min_body = None
+            min_normal = None
 
-            qdot_La = np.linalg.pinv(J_La).dot(min_dist_left * -min_normal_left[:2])
+            for collision in collision_pairs:
+                f_id = inspector.GetFrameId(collision.id_A)
+                body_A = self.py_plant.GetBodyFromFrameId(f_id)
+                f_id = inspector.GetFrameId(collision.id_B)
+                body_B = self.py_plant.GetBodyFromFrameId(f_id)
 
-            q_next[self.idx_q_a_l] += qdot_La
+                # Only collisions involving the box
+                if body_A.model_instance() != self.idx_u and body_B.model_instance() != self.idx_u:
+                    continue
 
-        if min_body_right:
-            J_R = self.py_plant.CalcJacobianTranslationalVelocity(
-                self.q_sim_py.context_plant,
-                JacobianWrtVariable.kV,
-                min_body_right.body_frame(),
-                np.array([0, 0, 0]),
-                self.py_plant.world_frame(),
-                self.py_plant.world_frame(),
-            )
+                # Only collisions involving this arm
+                if body_A.model_instance() != model_idx and body_B.model_instance() != model_idx:
+                    continue
 
-            J_Ra = J_R[:2, self.idx_q_a_r]
+                if collision.distance < min_dist:
+                    min_dist = collision.distance
+                    min_body = body_A if body_A.model_instance() == model_idx else body_B
+                    # nhat_BA_W points from B to A; we want normal pointing from box toward arm
+                    normal_sign = 1 if body_A.model_instance() == model_idx else -1
+                    min_normal = normal_sign * collision.nhat_BA_W
 
-            qdot_Ra = np.linalg.pinv(J_Ra).dot(min_dist_right * -min_normal_right[:2])
+            if min_body:
+                J = self.py_plant.CalcJacobianTranslationalVelocity(
+                    self.q_sim_py.context_plant,
+                    JacobianWrtVariable.kV,
+                    min_body.body_frame(),
+                    np.array([0, 0, 0]),
+                    self.py_plant.world_frame(),
+                    self.py_plant.world_frame(),
+                )
 
-            q_next[self.idx_q_a_r] += qdot_Ra
+                J_a = J[:2, joint_indices]
+                qdot = np.linalg.pinv(J_a).dot(min_dist * -min_normal[:2])
+
+                q_next[joint_indices] += qdot
+                q_next[joint_indices] = self.cast_to_cone(
+                    q_next[joint_indices], min_normal, arm_pose, 30
+                )
 
         return q_next
     
@@ -537,7 +563,37 @@ class IrsRrtTrajectory(IrsRrt):
                 break
             
         return x 
+    
+    def calc_du_star_towards_q(self, parent_node: Node, q: np.ndarray):
+        if self.rrt_params.du_star_mode == DuStarMode.EEFDiff:
+            du_star = self.calc_du_star_towards_q_diff(parent_node, q)
+        elif self.rrt_params.du_star_mode == DuStarMode.LSTSQ:
+            du_star = self.calc_du_star_towards_q_lstsq(parent_node, q)
+        elif self.rrt_params.du_star_mode == DuStarMode.ConstrainedLSTSQ:
+            du_star = self.calc_du_star_towards_q_constrained_lstsq(parent_node, q)
+        elif self.rrt_params.du_star_mode == DuStarMode.QP:
+            du_star = self.calc_du_star_towards_q_qp(parent_node, q)
+        else:
+            raise Exception(f"Unknown du_star_mode {self.rrt_params.du_star_mode}")
+        
+        return du_star
+    
 
+    def get_trimmed_q_and_u_knots_to_goal_with_hold(self):
+        """
+        Like `get_trimmed_q_and_u_knots_to_goal`, but appends one extra
+        action at the end of u so that `len(u) == len(q)`. The extra
+        action is computed at the goal-closest node via the bundled
+        gradient dynamics and the configured du* mode, with the target
+        set to the RRT goal — so any residual offset between the final
+        node and the goal gets corrected on the last step.
+        """
+        q_knots, u_knots = self.get_trimmed_q_and_u_knots_to_goal()
+        final_node = self.find_node_closest_to_goal()
+        du_star = self.calc_du_star_towards_q(final_node, self.rrt_params.goal)
+        u_star = final_node.ubar + du_star
+        u_knots = np.concatenate([u_knots, u_star[None, :]], axis=0)
+        return q_knots, u_knots
 
     def sample_contact(self, parent_node: Node):
         """
@@ -570,25 +626,15 @@ class IrsRrtTrajectory(IrsRrt):
         Extend towards a specified configuration q and return a new
         node,
         """
-        if self.rrt_params.du_star_mode == DuStarMode.EEFDiff:
-            du_star = self.calc_du_star_towards_q_diff(parent_node, q)
-        elif self.rrt_params.du_star_mode == DuStarMode.LSTSQ:
-            du_star = self.calc_du_star_towards_q_lstsq(parent_node, q)
-        elif self.rrt_params.du_star_mode == DuStarMode.ConstrainedLSTSQ:
-            du_star = self.calc_du_star_towards_q_constrained_lstsq(parent_node, q)
-        elif self.rrt_params.du_star_mode == DuStarMode.QP:
-            du_star = self.calc_du_star_towards_q_qp(parent_node, q)
-        else:
-            raise Exception(f"Unknown du_star_mode {self.rrt_params.du_star_mode}")
+        du_star = self.calc_du_star_towards_q(parent_node, q)
         u_star = parent_node.ubar + du_star
 
-        u_star, _ = self.rrt_params.robot_state_clamp_func(u_star)
-    
         x_next = self.q_sim.calc_dynamics(
             parent_node.q, u_star, self.sim_params
         )
 
-        x_next = self.step_in(x_next)
+        if self.rrt_params.step_in:
+            x_next = self.step_in(x_next)
 
         cost = 0.0
 

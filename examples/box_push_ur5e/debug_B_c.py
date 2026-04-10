@@ -3,13 +3,11 @@ import numpy as np
 from irs_rrt.irs_rrt_trajectory import IrsRrtTrajectory
 
 from pydrake.all import AngleAxis
-from box_lift_setup import *
+from box_push_setup import *
 
 from pydrake.all import (
     JacobianWrtVariable,
 )
-
-contact_sampler.flip_axis_prob = 0.5
 
 prob_rrt = IrsRrtTrajectory(
     rrt_params,
@@ -17,7 +15,6 @@ prob_rrt = IrsRrtTrajectory(
     q_sim,
     q_sim_py,
     pose_sampling_function,
-    # q_sim_smooth=q_sim_smooth
 )
 
 
@@ -27,34 +24,34 @@ def constrained_least_squares(A, b, d, tol=1e-10, max_iter=100):
     """
     AtA = A.T @ A
     Atb = A.T @ b
-    
+
     # Unconstrained LS solution
     x0 = np.linalg.solve(AtA, Atb)
     if np.linalg.norm(x0) <= d:
         return x0  # constraint inactive
-        
+
     lam_low, lam_high = 0, 1.0
-    
+
     # Increase lam_high until norm(x) < d
     for _ in range(50):
         x = np.linalg.solve(AtA + lam_high * np.eye(A.shape[1]), Atb)
         if np.linalg.norm(x) < d:
             break
         lam_high *= 2
-    
+
     # Binary search λ
     for _ in range(max_iter):
         lam = 0.5 * (lam_low + lam_high)
         x = np.linalg.solve(AtA + lam * np.eye(A.shape[1]), Atb)
-        
+
         if np.linalg.norm(x) > d:
             lam_low = lam
         else:
             lam_high = lam
-        
+
         if lam_high - lam_low < tol:
             break
-    
+
     return x
 
 
@@ -65,7 +62,7 @@ def step(q, q_goal):
         du_star = constrained_least_squares(Bhat[idx_q_u], (q_goal - chat)[idx_q_u], rrt_params.stepsize)
 
         u_star = q[idx_q_a] + du_star
-        
+
         q_next = q_sim.calc_dynamics(q, u_star, prob_rrt.sim_params)
 
         print(q_next[idx_q_a] - u_star)
@@ -83,7 +80,6 @@ def get_m_dist(q, q_goal):
     ) = prob_rrt.reachable_set.calc_unactuated_metric_parameters(Bhat, chat)
     covinv_u = np.linalg.inv(cov_u)
 
-
     # 1 x n
     mu_batch = mu_u[None, :]
     # 1 x n x n
@@ -97,10 +93,10 @@ def get_m_dist(q, q_goal):
     return mahalabonis_distance
 
 
-def cast_to_cone(joints, normal, arm_pose, deg):
+def cast_to_cone(joints, normal, arm_pose_val, deg):
     rad = np.deg2rad(deg)
 
-    ee_pose = utils.get_ee_pose(joints, arm_pose)
+    ee_pose = utils.get_ee_pose(joints, arm_pose_val, eef_offset=eef_offset)
     ee_dir = utils.quat_apply(ee_pose[:4], np.array([0,0,1]))
     dot = np.dot(ee_dir, -normal)
     theta = np.arccos(dot)
@@ -109,9 +105,9 @@ def cast_to_cone(joints, normal, arm_pose, deg):
 
     if theta <= rad:
         return joints
-    
+
     print("CAST JOINTS")
-    
+
     tilt_axis = np.cross(-normal, ee_dir)
     tilt_axis /= np.linalg.norm(tilt_axis)
     ee_quat = Quaternion(ee_pose[:4])
@@ -121,17 +117,17 @@ def cast_to_cone(joints, normal, arm_pose, deg):
     ee_quat_new: Quaternion = q_correction.multiply(ee_quat)
 
     ee_pose_new = np.concatenate([ee_quat_new.wxyz(), ee_pose[4:]])
-    
-    # TODO: get all configurations and filter
-    joints_new = utils.get_joints(ee_pose_new, arm_pose, joints, robot='ur5e')
 
-    print(ee_pose, utils.get_ee_pose(joints_new, arm_pose, 'ur5e'), ee_pose_new)
+    joints_new = utils.get_joints(ee_pose_new, arm_pose_val, joints, robot='ur5e', eef_offset=eef_offset)
+
+    print(ee_pose, utils.get_ee_pose(joints_new, arm_pose_val, 'ur5e', eef_offset=eef_offset), ee_pose_new)
 
     return joints_new
 
 def step_in(q):
     """
     Given a near-contact configuration, give a q that steps in contact.
+    Single-arm version.
     """
     q_sim_py.update_mbp_positions_from_vector(q)
 
@@ -143,14 +139,9 @@ def step_in(q):
 
     inspector = query_object.inspector()
 
-    # 1. Compute closest distance pairs and normals.
-    min_dist_left = np.inf
-    min_dist_right = np.inf
-
-    min_body_left = None
-    min_body_right = None
-    min_normal_left = None
-    min_normal_right = None
+    min_dist = np.inf
+    min_body = None
+    min_normal = None
 
     for collision in collision_pairs:
         f_id = inspector.GetFrameId(collision.id_A)
@@ -158,72 +149,37 @@ def step_in(q):
         f_id = inspector.GetFrameId(collision.id_B)
         body_B = plant.GetBodyFromFrameId(f_id)
 
-        # We only care about collisions with the box
+        # Only collisions with the box
         if body_A.model_instance() != idx_u and body_B.model_instance() != idx_u:
             continue
 
-        # left ee collision
-        if (body_A.model_instance() == idx_a_l) or (body_B.model_instance() == idx_a_l):
-            if collision.distance < min_dist_left:
-                min_dist_left = collision.distance
-                min_body_left = body_A if body_A.model_instance() == idx_a_l else body_B
-                normal_sign = 1 if body_A.model_instance() == idx_a_r else -1
-                min_normal_left = normal_sign * collision.nhat_BA_W
+        # Only collisions with our arm
+        if body_A.model_instance() != idx_a and body_B.model_instance() != idx_a:
+            continue
 
-        # right ee collision
-        if (body_A.model_instance() == idx_a_r) or (body_B.model_instance() == idx_a_r):
-            if collision.distance < min_dist_right:
-                min_dist_right = collision.distance
-                min_body_right = body_A if body_A.model_instance() == idx_a_r else body_B
-                normal_sign = 1 if body_A.model_instance() == idx_a_r else -1
-                min_normal_right = normal_sign * collision.nhat_BA_W
+        if collision.distance < min_dist:
+            min_dist = collision.distance
+            min_body = body_A if body_A.model_instance() == idx_a else body_B
+            normal_sign = 1 if body_A.model_instance() == idx_a else -1
+            min_normal = normal_sign * collision.nhat_BA_W
 
     q_next = np.copy(q)
 
-    if min_body_left:
-        # 2. Compute Jacobians and qdot.
-        J_L = plant.CalcJacobianTranslationalVelocity(
+    if min_body:
+        J = plant.CalcJacobianTranslationalVelocity(
             q_sim_py.context_plant,
             JacobianWrtVariable.kV,
-            min_body_left.body_frame(),
+            min_body.body_frame(),
             np.array([0, 0, 0]),
             plant.world_frame(),
             plant.world_frame(),
         )
 
-        J_La = J_L[:2, idx_q_a_l]
+        J_a = J[:2, idx_q_a]
+        qdot = np.linalg.pinv(J_a).dot(min_dist * -min_normal[:2])
 
-        qdot_La = np.linalg.pinv(J_La).dot(min_dist_left * -min_normal_left[:2])
-
-        q_next[idx_q_a_l] += qdot_La
-        q_next[idx_q_a_l] = cast_to_cone(q_next[idx_q_a_l], min_normal_left, arm_l_pose, 30)
-
-
-    if min_body_right:
-        J_R = plant.CalcJacobianTranslationalVelocity(
-            q_sim_py.context_plant,
-            JacobianWrtVariable.kV,
-            min_body_right.body_frame(),
-            np.array([0, 0, 0]),
-            plant.world_frame(),
-            plant.world_frame(),
-        )
-
-        J_Ra = J_R[:2, idx_q_a_r]
-
-        qdot_Ra = np.linalg.pinv(J_Ra).dot(min_dist_right * -min_normal_right[:2])
-
-        q_next[idx_q_a_r] += qdot_Ra
-
-        q_next[idx_q_a_r] = cast_to_cone(q_next[idx_q_a_r], min_normal_right, arm_r_pose, 30)
-
-    
-    # q_vis.draw_configuration(q)
-    # input("Before:")
-    # q_vis.draw_configuration(q_next)
-    # input("After stepping in")
-    # q_vis.draw_configuration(q_next)
-    # input("After casting to 30 degree cone")
+        q_next[idx_q_a] += qdot
+        q_next[idx_q_a] = cast_to_cone(q_next[idx_q_a], min_normal, arm_pose, 30)
 
     return q_next
 
@@ -240,7 +196,7 @@ while True:
     rrt_params.goal = q_goal
 
     np.set_printoptions(suppress=True, precision=3)
-
+    
     qs = []
     m_dists = []
 
@@ -255,25 +211,17 @@ while True:
         m_dist_next = get_m_dist(q_next, q_goal)
 
         m_dists.append(m_dist_next)
-        
+
         if n_contacts == 0:
             print(m_dist, m_dist_next)
             q_vis.draw_configuration(qi)
 
             i = input()
-                
+
             if i == '0':
                 break
 
-    
-    # while True:
-    #     j = int(input("joint: "))
-    #     if j < 0 or j > len(qi):
-    #         break
-    #     rad = float(input("rad: "))
-    #     qi[j] = rad
-    #     q_vis.draw_configuration(qi)
-    
+
     qs = np.array(qs)
     m_dists = np.array(m_dists)
 
@@ -293,7 +241,7 @@ while True:
             qi = step(qi, q_goal)
 
             qi = step_in(qi)
-        
+
             q_vis.draw_configuration(qi)
 
             m_dist = get_m_dist(qi, q_goal)

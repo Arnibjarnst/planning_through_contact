@@ -171,10 +171,6 @@ rrt_params.batch_size = 4
 
 rrt_params.use_free_solvers = False
 
-def robot_state_clamp(q_a):
-    return q_a, False
-
-rrt_params.robot_state_clamp_func = robot_state_clamp
 
 def get_best_joint_configurations(joint_configs, q_, model_idx, joint_idx):
     q = np.copy(q_)

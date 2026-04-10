@@ -100,8 +100,8 @@ rrt_params_no_connect_from_behind.connect_from_behind = False
 rrt_params_no_connect_to_front = safe_deepcopy(rrt_params)
 rrt_params_no_connect_to_front.connect_to_front = False
 
-rrt_params_no_sample_noise = safe_deepcopy(rrt_params)
-rrt_params_no_sample_noise.joint_limits[idx_u] = np.zeros((7,2))
+# rrt_params_no_sample_noise = safe_deepcopy(rrt_params)
+# rrt_params_no_sample_noise.joint_limits[idx_u] = np.zeros((7,2))
 
 rrt_params_no_subgoals = safe_deepcopy(rrt_params)
 rrt_params_no_subgoals.subgoal_ts = [0.0, 1.0]
@@ -117,7 +117,7 @@ rrt_params_ablation = {
     "reachability regrasp": rrt_params_no_corner_distance,
     "connect from anywhere": rrt_params_no_connect_from_behind,
     "connect to anywhere": rrt_params_no_connect_to_front,
-    "no trajectory noise": rrt_params_no_sample_noise,
+    # "no trajectory noise": rrt_params_no_sample_noise,
     "no subgoals": rrt_params_no_subgoals,
     "no step in": rrt_params_no_step_in,
 }
@@ -161,11 +161,6 @@ for trial_name, rrt_param_config in rrt_params_ablation.items():
             "mean_success": 0,
             "mean_success_t": 0,
         }
-
-    
-    with open(save_path, 'w') as fp:
-        json.dump(records, fp, indent=4)
-
 
     for seed in seeds:
         t, success = run_trial(rrt_param_config, seed)

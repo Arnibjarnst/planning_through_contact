@@ -1,7 +1,9 @@
+import os
+
 import numpy as np
 
 from ur_ikfast import ur_kinematics
-from pydrake.all import RigidTransform, Quaternion, RotationMatrix
+from pydrake.all import RigidTransform, Quaternion, RotationMatrix, RollPitchYaw
 
 def cosine_weighted_cone(theta_max):
     """
@@ -46,6 +48,11 @@ def dir_to_quat(direction):
 
     return np.array([w, xyz[0], xyz[1], xyz[2]])
 
+def quat_apply(q: np.ndarray, vec: np.ndarray):
+    xyz = q[1:]
+    t = np.cross(xyz, vec) * 2
+    return (vec + q[:1] * t + np.cross(xyz, t))
+
 
 def get_wrist_pose(ee_pos: np.ndarray, ee_direction: np.ndarray):
     wrist_quat : Quaternion = RotationMatrix.MakeFromOneVector(ee_direction, axis_index=2).ToQuaternion()
@@ -65,18 +72,17 @@ def get_wrist_poses(positions: np.ndarray, directions: np.ndarray):
     ])
     return poses
 
-def get_ee_pose(joints, robot_pose, robot="ur5"):
+def get_ee_pose(joints, robot_pose, robot="ur5e", eef_offset=0.02):
     ur5_arm = ur_kinematics.URKinematics(robot)
 
     # [x, y, z, qx, qy, qz, qw]
     wrist_pose_local = ur5_arm.forward(joints)
     wrist_quaternion = Quaternion(x=wrist_pose_local[3], y=wrist_pose_local[4], z=wrist_pose_local[5], w=wrist_pose_local[6])
 
-    # shift ee position by 0.02 in z direction of wrist frame
-    ee_pos_local = wrist_pose_local[:3] + wrist_quaternion.rotation() @ np.array([0.0, 0.0, 0.02])
-    # Use same orientation as wrist
+    # shift ee position along wrist z by eef_offset (0 if no sphere EEF)
+    ee_pos_local = wrist_pose_local[:3] + wrist_quaternion.rotation() @ np.array([0.0, 0.0, eef_offset])
     ee_pose_local_quat = wrist_quaternion
-    
+
     pose_to_robot = RigidTransform(quaternion=ee_pose_local_quat, p=ee_pos_local)
 
     robot_pose_quat = Quaternion(robot_pose[:4])
@@ -89,17 +95,28 @@ def get_ee_pose(joints, robot_pose, robot="ur5"):
 
     return np.concatenate([ee_quat_abs, ee_pos_abs])
 
-def get_joints(pose, robot_pose, last = np.zeros(6), get_all_solutions=False, robot='ur5'):
+def ee_pose_to_wrist_pose(pose, eef_offset=0.02):
+    pos = pose[4:]
+    quat = Quaternion(pose[:4])
+    dpos = quat.rotation() @ np.array([0.0, 0.0, -eef_offset])
+
+    pose_wrist = np.concatenate([quat.wxyz(), pos + dpos])
+
+    return pose_wrist
+
+def get_joints(pose, robot_pose, last=np.zeros(6), get_all_solutions=False, robot='ur5e', eef_offset=0.02):
     ur5_arm = ur_kinematics.URKinematics(robot)
 
-    pose_quat = Quaternion(pose[:4])
-    pose_to_world = RigidTransform(quaternion=pose_quat, p=pose[4:])
+    wrist_pose = ee_pose_to_wrist_pose(pose, eef_offset=eef_offset)
+
+    wrist_quat = Quaternion(wrist_pose[:4])
+    wrist_pose_to_world = RigidTransform(quaternion=wrist_quat, p=wrist_pose[4:])
 
     robot_pose_quat = Quaternion(robot_pose[:4])
-    
+
     world_to_robot = RigidTransform(quaternion=robot_pose_quat, p=robot_pose[4:]).inverse()
 
-    RT_pose_rel : RigidTransform = world_to_robot @ pose_to_world
+    RT_pose_rel : RigidTransform = world_to_robot @ wrist_pose_to_world
 
     pose_pos_rel = RT_pose_rel.translation()
     pose_quat_rel = RT_pose_rel.rotation().ToQuaternion()
@@ -119,3 +136,327 @@ def convert_pose_to_isaaclab(poses):
     quat = poses[..., :4]
 
     return np.concatenate([pos, quat], axis=-1)
+
+
+def generate_box_sdf(
+    dims: np.ndarray,
+    mass: float = 1.0,
+    friction: float = 0.8,
+    corner_friction: float = 0.1,
+    model_name: str = "box",
+    bounce: bool = True,
+) -> str:
+    """Generate an SDF string for a box with corner collision spheres."""
+    x, y, z = dims
+    hx, hy, hz = dims / 2
+
+    # Inertia for uniform density box
+    ixx = mass / 12 * (y**2 + z**2)
+    iyy = mass / 12 * (x**2 + z**2)
+    izz = mass / 12 * (x**2 + y**2)
+
+    # Collision geometry slightly smaller to avoid degenerate contacts
+    cx, cy, cz = x - 0.001, y - 0.001, z - 0.001
+
+    # 8 corner positions
+    corners = []
+    for sx, name_x in [(-1, "minus_x"), (1, "plus_x")]:
+        for sy, name_y in [(-1, "lower"), (1, "upper")]:
+            for sz, name_z in [(-1, "left"), (1, "right")]:
+                corners.append((
+                    f"{name_x}_{name_y}_{name_z}_corner",
+                    sx * hx, sy * hy, sz * hz,
+                ))
+
+    bounce_xml = ""
+    if bounce:
+        bounce_xml = """
+          <bounce>
+            <restitution_coefficient>0.0</restitution_coefficient>
+            <threshold>1e+06</threshold>
+          </bounce>"""
+
+    corner_xml = ""
+    for name, px, py, pz in corners:
+        corner_xml += f"""
+      <collision name="{name}">
+        <pose> {px} {py} {pz} 0 0 0</pose>
+        <geometry>
+          <sphere>
+            <radius>1e-7</radius>
+          </sphere>
+        </geometry>
+        <surface>
+          <friction>
+            <ode>
+              <mu>{corner_friction}</mu>
+              <mu2>{corner_friction}</mu2>
+            </ode>
+          </friction>
+        </surface>
+      </collision>
+"""
+
+    return f"""<?xml version="1.0"?>
+<sdf version="1.7">
+  <model name="{model_name}">
+    <link name="box">
+      <inertial>
+        <mass>{mass}</mass>
+        <inertia>
+          <ixx>{ixx}</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>{iyy}</iyy>
+          <iyz>0</iyz>
+          <izz>{izz}</izz>
+        </inertia>
+      </inertial>
+
+      <visual name="box_visual">
+        <geometry>
+          <box>
+            <size>{x} {y} {z}</size>
+          </box>
+        </geometry>
+        <material>
+          <diffuse>0.9 0.9 0.9 0.9</diffuse>
+        </material>
+      </visual>
+
+      <collision name="collision">
+        <geometry>
+          <box>
+            <size>{cx} {cy} {cz}</size>
+          </box>
+        </geometry>
+        <surface>
+          <friction>
+            <ode>
+              <mu>{friction}</mu>
+              <mu2>{friction}</mu2>
+            </ode>
+          </friction>{bounce_xml}
+        </surface>
+      </collision>
+{corner_xml}
+    </link>
+  </model>
+</sdf>
+"""
+
+
+def _pose_to_yml_transform(pose: np.ndarray) -> str:
+    """Convert [qw,qx,qy,qz,x,y,z] pose to YML X_PF block."""
+    quat = Quaternion(pose[:4])
+    rpy = RollPitchYaw(quat).vector()  # radians
+    rpy_deg = np.degrees(rpy)
+    trans = pose[4:]
+
+    lines = f"        base_frame: world\n"
+    lines += f"        translation: [{trans[0]}, {trans[1]}, {trans[2]}]\n"
+
+    # Only add rotation if non-identity
+    if not np.allclose(rpy_deg, 0, atol=0.01):
+        # Avoid -0.0 in output
+        r, p, y = [0.0 if abs(v) < 0.01 else v for v in rpy_deg]
+        lines += f"        rotation: !Rpy {{deg: [{r:.1f}, {p:.1f}, {y:.1f}]}}\n"
+
+    return lines
+
+
+def _generate_ground_sdf(friction: float, model_name: str = "ground") -> str:
+    """Generate a ground plane SDF with configurable friction."""
+    return f"""<sdf version='1.6'>
+  <model name='{model_name}'>
+
+  <link name="ground">
+  <pose> 0 0 0 0 0 0</pose>
+  <visual name='visual'>
+    <pose frame=''> 0 0 0 0 0 0 </pose>
+    <geometry>
+      <box>
+       <size>10 10 1</size>
+      </box>
+    </geometry>
+    <material>
+      <diffuse>0.39 0.4 0.42 1.0</diffuse>
+    </material>
+  </visual>
+
+  <collision name='collision'>
+    <pose> 0 0 0 0 0 0 </pose>
+    <geometry>
+      <box>
+       <size>10 10 1</size>
+      </box>
+    </geometry>
+
+    <surface>
+      <friction>
+      <ode>
+        <mu>{friction}</mu>
+        <mu2>{friction}</mu2>
+      </ode>
+      </friction>
+    </surface>
+  </collision>
+  </link>
+
+  </model>
+</sdf>
+"""
+
+
+def _generate_ground_yml(ground_sdf_name: str, z_offset: float = -0.5) -> str:
+    """Generate a ground model directive YML."""
+    return f"""directives:
+  - add_model:
+      name: ground
+      file: package://quasistatic_simulator/{ground_sdf_name}
+
+  - add_frame:
+      name: ground_world_offset
+      X_PF:
+        base_frame: world
+        translation: [ 0, 0, {z_offset}]
+
+  - add_weld:
+      parent: ground_world_offset
+      child: ground::ground
+"""
+
+
+def generate_ur5e_box_models(
+    models_dir: str,
+    object_dims: np.ndarray,
+    arms: dict,
+    mass: float = 1.0,
+    friction: float = 0.8,
+    ground_friction: float = None,
+    ground_offset: float = 0.0,
+    prefix: str = "generated",
+    robot_sdf: str = "ur5e.sdf",
+    gradients: bool = False,
+) -> str:
+    """Generate SDF and YML model files for N UR5e arms + box task.
+
+    Args:
+        models_dir: Path to quasistatic_simulator/models/
+        object_dims: Box [x, y, z] dimensions
+        arms: Dict mapping robot name to [qw,qx,qy,qz,x,y,z] base pose.
+              e.g. {"ur5e": pose} or {"ur5e_l": pose_l, "ur5e_r": pose_r}
+        mass: Box mass in kg
+        friction: Box surface friction coefficient
+        ground_friction: Ground surface friction. If None, uses shared ground.yml.
+        ground_offset: Vertical offset of ground surface in meters (e.g. 0.018
+            for a surface 1.8cm above the robot base plane).
+        prefix: Filename prefix for generated files
+        robot_sdf: SDF file for the robot (relative to models_dir package)
+        gradients: If True, also generate a gradients variant
+                   (ground shifted down 2mm, no bounce on box collision)
+
+    Returns:
+        q_model_path: Absolute path to the generated q_sys YML file.
+            If gradients=True, returns (q_model_path, q_model_path_gradients).
+    """
+    q_sys_dir = os.path.join(models_dir, "q_sys")
+
+    # 1. Generate box SDF
+    box_sdf = generate_box_sdf(object_dims, mass=mass, friction=friction)
+    box_sdf_name = f"{prefix}_box.sdf"
+    with open(os.path.join(models_dir, box_sdf_name), "w") as f:
+        f.write(box_sdf)
+
+    if gradients:
+        box_sdf_grad = generate_box_sdf(
+            object_dims, mass=mass, friction=friction, bounce=False,
+        )
+        box_sdf_grad_name = f"{prefix}_box_gradients.sdf"
+        with open(os.path.join(models_dir, box_sdf_grad_name), "w") as f:
+            f.write(box_sdf_grad)
+
+    # 1b. Generate ground SDF + YML if custom friction or offset specified
+    custom_ground = ground_friction is not None or ground_offset != 0.0
+    if custom_ground:
+        gf = ground_friction if ground_friction is not None else 0.5
+        z_base = -0.5 + ground_offset
+
+        ground_sdf_name = f"{prefix}_ground.sdf"
+        with open(os.path.join(models_dir, ground_sdf_name), "w") as f:
+            f.write(_generate_ground_sdf(gf))
+
+        ground_yml_name = f"{prefix}_ground.yml"
+        with open(os.path.join(models_dir, ground_yml_name), "w") as f:
+            f.write(_generate_ground_yml(ground_sdf_name, z_offset=z_base))
+
+        if gradients:
+            ground_yml_grad_name = f"{prefix}_ground_gradients.yml"
+            with open(os.path.join(models_dir, ground_yml_grad_name), "w") as f:
+                f.write(_generate_ground_yml(ground_sdf_name, z_offset=z_base - 0.002))
+    else:
+        ground_yml_name = "ground.yml"
+        ground_yml_grad_name = "ground_gradients.yml"
+
+    # 2. Generate model directive YML(s)
+    def _write_directive(ground_file, out_name):
+        arm_blocks = ""
+        for name, pose in arms.items():
+            transform_block = _pose_to_yml_transform(pose)
+            arm_blocks += f"""
+- add_model:
+    name: {name}
+    file: package://quasistatic_simulator/{robot_sdf}
+
+- add_frame:
+    name: world_{name}_offset
+    X_PF:
+{transform_block}
+- add_weld:
+    parent: world_{name}_offset
+    child: {name}::base_link
+"""
+        directive = f"directives:\n- add_directives:\n    file: package://quasistatic_simulator/{ground_file}\n{arm_blocks}"
+        with open(os.path.join(models_dir, out_name), "w") as f:
+            f.write(directive)
+
+    directive_name = f"{prefix}_ur5e.yml"
+    _write_directive(ground_yml_name, directive_name)
+
+    if gradients:
+        directive_grad_name = f"{prefix}_ur5e_gradients.yml"
+        _write_directive(ground_yml_grad_name, directive_grad_name)
+
+    # 3. Generate q_sys YML(s)
+    robot_entries = ""
+    for name in arms:
+        robot_entries += f"  -\n    name: {name}\n    Kp: [800, 600, 600, 600, 400, 200]\n"
+
+    def _write_q_sys(directive_ref, box_sdf_ref, out_path):
+        q_sys_yml = f"""model_directive: package://quasistatic_simulator/{directive_ref}
+robots:
+{robot_entries}
+objects:
+  -
+    name: box
+    file: package://quasistatic_simulator/{box_sdf_ref}
+
+quasistatic_sim_params:
+  gravity: [0, 0, -9.8]
+  nd_per_contact: 4
+  contact_detection_tolerance: 0.2
+  is_quasi_dynamic: True
+  unactuated_mass_scale: .NAN
+"""
+        with open(out_path, "w") as f:
+            f.write(q_sys_yml)
+
+    q_sys_path = os.path.join(q_sys_dir, f"{prefix}_ur5e_box.yml")
+    _write_q_sys(directive_name, box_sdf_name, q_sys_path)
+
+    if gradients:
+        q_sys_grad_path = os.path.join(q_sys_dir, f"{prefix}_ur5e_box_gradients.yml")
+        _write_q_sys(directive_grad_name, box_sdf_grad_name, q_sys_grad_path)
+        return q_sys_path, q_sys_grad_path
+
+    return q_sys_path

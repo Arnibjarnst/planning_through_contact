@@ -530,8 +530,6 @@ class IrsRrtProjection(IrsRrt):
             raise Exception(f"Unknown du_star_mode {self.rrt_params.du_star_mode}")
         u_star = parent_node.ubar + du_star
 
-        u_star, _ = self.rrt_params.robot_state_clamp_func(u_star)
-
         x_next = self.q_sim.calc_dynamics(
             parent_node.q, u_star, self.sim_params
         )

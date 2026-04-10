@@ -16,14 +16,10 @@ from qsim.parser import QuasistaticParser
 from irs_mpc2.quasistatic_visualizer import QuasistaticVisualizer
 from irs_mpc2.irs_mpc_params import SmoothingMode
 
-q_model_path = os.path.join(models_dir, "q_sys", "ur5e_sphere_bimanual_box.yml")
-q_model_path_gradients = os.path.join(models_dir, "q_sys", "ur5e_sphere_bimanual_box_gradients.yml")
-
 # Names
 eef_l_name = "ur5e_l"
 eef_r_name = "ur5e_r"
 object_name = "box"
-
 
 # Robot poses
 # [qw, qx, qy, qz, x, y, z]
@@ -35,6 +31,16 @@ arm_reach = 0.7
 
 # initial conditions.
 object_dims = np.array([0.4, 0.6, 0.06])
+box_mass = 1.0
+
+# Generate model files from the parameters above
+q_model_path, q_model_path_gradients = utils.generate_ur5e_box_models(
+    models_dir, object_dims,
+    {eef_l_name: arm_l_pose, eef_r_name: arm_r_pose},
+    mass=box_mass, prefix="box_lift",
+    robot_sdf="ur5e_sphere.sdf",
+    gradients=True,
+)
 q_u0 = np.array([1, 0, 0, 0, 0, 0, 0.03])
 t0 = 0.0
 t1 = 1.0
@@ -105,23 +111,23 @@ idx_q_u = q_sim.get_q_u_indices_into_q()
 
 joint_limits_ur5e = np.array([
     [-6.28319, 6.28319],
+    [-3.39, 0.25], # One continuous segment above ground
+    [-2.8,  2.8],
     [-6.28319, 6.28319],
     [-6.28319, 6.28319],
-    [-3.14159, 0.785398],
-    [-3.14159, 3.14159],
-    [-3.14159, 3.14159],
+    [-6.28319, 6.28319],
 ])
 
 joint_limits = {
     idx_u: np.array(
         [
-            [-0.1, 0.1], # roll
-            [-0.1, 0.1], # pitch
-            [-0.1, 0.1], # yaw
+            [-0.0, 0.0], # roll
+            [-0.0, 0.0], # pitch
+            [-0.0, 0.0], # yaw
             [0, 0], # placeholder
-            [-0.05, 0.05], # x
-            [-0.05, 0.05], # y
-            [0.0, 0.05], # z
+            [-0.0, 0.0], # x
+            [-0.0, 0.0], # y
+            [0.0, 0.0], # z
         ]
     ),
     idx_a_l: joint_limits_ur5e,
@@ -139,7 +145,7 @@ q0 = q_sim.get_q_vec_from_dict(q0_dict)
 rrt_params = IrsRrtTrajectoryParams(q_model_path, joint_limits)
 rrt_params.smoothing_mode = SmoothingMode.k1AnalyticIcecream
 rrt_params.root_node = IrsTrajectoryNode(q0)
-rrt_params.max_size = 20000
+rrt_params.max_size = 50000
 rrt_params.goal = np.zeros(dim_x)
 rrt_params.goal[idx_q_u] = goal_u
 rrt_params.termination_tolerance = 0.1
@@ -155,7 +161,7 @@ rrt_params.std_u = 0.1 * np.ones(6)
 rrt_params.n_samples = 100
 
 rrt_params.du_star_mode = DuStarMode.ConstrainedLSTSQ
-rrt_params.stepsize = 0.15
+rrt_params.stepsize = 0.1
 rrt_params.rewire = False
 rrt_params.distance_metric = "local_u"
 rrt_params.grasp_prob = 0.2
@@ -172,10 +178,9 @@ rrt_params.initial_contact_samples = 128
 
 rrt_params.use_free_solvers = False
 
-def robot_state_clamp(q_a):
-    return q_a, False
-
-rrt_params.robot_state_clamp_func = robot_state_clamp
+rrt_params.arm_poses = {eef_l_name: arm_l_pose, eef_r_name: arm_r_pose}
+rrt_params.arm_l_pose = arm_l_pose
+rrt_params.arm_r_pose = arm_r_pose
 
 def get_best_joint_configurations(joint_configs, q_, model_idx, joint_idx):
     q = np.copy(q_)
@@ -193,7 +198,7 @@ def get_best_joint_configurations(joint_configs, q_, model_idx, joint_idx):
         sg = q_sim_py.get_scene_graph()
         query_object = sg.GetOutputPort("query").Eval(q_sim_py.context_sg)
         collision_pairs = (
-            query_object.ComputeSignedDistancePairwiseClosestPoints(-0.002)
+            query_object.ComputeSignedDistancePairwiseClosestPoints(0.0)
         )
         inspector = query_object.inspector()
 
@@ -204,6 +209,9 @@ def get_best_joint_configurations(joint_configs, q_, model_idx, joint_idx):
             f_id = inspector.GetFrameId(collision.id_B)
             body_B = plant.GetBodyFromFrameId(f_id)
 
+            if body_A.name() == "ee_link" or body_B.name() == "ee_link":
+                continue
+
             if body_A.model_instance() == model_idx or body_B.model_instance() == model_idx:
                 is_collision = True
                 break
@@ -213,17 +221,17 @@ def get_best_joint_configurations(joint_configs, q_, model_idx, joint_idx):
             for i in range(6):
                 for add_ang in [-2. * np.pi, 0, 2. * np.pi]:
                     test_ang = joints[i] + add_ang
-                    if (abs(test_ang) <= 2. * np.pi
-                            and abs(test_ang - original_joints[i]) <
-                            abs(test_sol[i] - original_joints[i])):
+                    if (
+                        test_ang >= joint_limits_ur5e[i, 0] and
+                        test_ang <= joint_limits_ur5e[i, 1] and
+                        abs(test_ang - original_joints[i]) < abs(test_sol[i] - original_joints[i])
+                    ):
                         test_sol[i] = test_ang
             if np.all(test_sol != 9999.):
                 sol_distance_from_original = np.sum((test_sol - original_joints)**2)
                 if sol_distance_from_original < best_sol_quality:
                     best_joints = test_sol
                     best_sol_quality = sol_distance_from_original
-            else:
-                test_sol
 
     return best_joints
 
@@ -451,52 +459,47 @@ class MagicContactSampler(ContactSampler):
         q0_pos = q0[idx_q_u[4:]]
         
         for _ in range(1000):
-            contact_1_local, contact_2_local, dir_1_local, dir_2_local = self.sample_contact_points_with_direction()
+            ee_pos_1_local, ee_pos_2_local, dir_1_local, dir_2_local = self.sample_contact_points_with_direction()
 
-            contact_1_global = q0_rot_mat @ contact_1_local + q0_pos
-            contact_2_global = q0_rot_mat @ contact_2_local + q0_pos
+            ee_pos_1_global = q0_rot_mat @ ee_pos_1_local + q0_pos
+            ee_pos_2_global = q0_rot_mat @ ee_pos_2_local + q0_pos
 
-            if contact_1_global[2] < self.eef_radius or contact_2_global[2] < self.eef_radius:
+            if ee_pos_1_global[2] < self.eef_radius or ee_pos_2_global[2] < self.eef_radius:
                 continue
 
             dir_1_global = q0_rot_mat @ dir_1_local
             dir_2_global = q0_rot_mat @ dir_2_local
 
             # Convert dirs to quats
-            quat_1_global = utils.dir_to_quat(dir_1_global)
-            quat_2_global = utils.dir_to_quat(dir_2_global)
+            ee_quat_1_global = utils.dir_to_quat(dir_1_global)
+            ee_quat_2_global = utils.dir_to_quat(dir_2_global)
 
-            wrist_pos_1_global = contact_1_global - self.eef_radius * dir_1_global
-            wrist_pos_2_global = contact_2_global - self.eef_radius * dir_2_global
-
-            wrist_pose_1_global = np.concatenate([quat_1_global, wrist_pos_1_global])
-            wrist_pose_2_global = np.concatenate([quat_2_global, wrist_pos_2_global])
-
+            ee_pose_1_global = np.concatenate([ee_quat_1_global, ee_pos_1_global])
+            ee_pose_2_global = np.concatenate([ee_quat_2_global, ee_pos_2_global])
 
             # TODO: use these joint values in the RL instead of recomputing
             # Try using them in the RRT
+            ee_pos_1_to_arm_l = np.linalg.norm(arm_l_pose[4:] - ee_pos_1_global)
+            ee_pos_1_to_arm_r = np.linalg.norm(arm_r_pose[4:] - ee_pos_1_global)
+            ee_pos_2_to_arm_l = np.linalg.norm(arm_l_pose[4:] - ee_pos_2_global)
+            ee_pos_2_to_arm_r = np.linalg.norm(arm_r_pose[4:] - ee_pos_2_global)
 
-            contact_1_to_arm_l = np.linalg.norm(arm_l_pose[4:] - contact_1_global)
-            contact_1_to_arm_r = np.linalg.norm(arm_r_pose[4:] - contact_1_global)
-            contact_2_to_arm_l = np.linalg.norm(arm_l_pose[4:] - contact_2_global)
-            contact_2_to_arm_r = np.linalg.norm(arm_r_pose[4:] - contact_2_global)
+            # swap if swapping would decrese the distance between ee_pos points and arm origins
+            if ee_pos_1_to_arm_r + ee_pos_2_to_arm_l < ee_pos_1_to_arm_l + ee_pos_2_to_arm_r:
+                ee_pose_1_global, ee_pose_2_global = ee_pose_2_global, ee_pose_1_global
 
-            # swap if swapping would decrese the distance between contact points and arm origins
-            if contact_1_to_arm_r + contact_2_to_arm_l < contact_1_to_arm_l + contact_2_to_arm_r:
-                wrist_pose_1_global, wrist_pose_2_global = wrist_pose_2_global, wrist_pose_1_global
-
-            all_joints_l = utils.get_joints(wrist_pose_1_global, arm_l_pose, q0[idx_q_a_l], True, "ur5e")
+            all_joints_l = utils.get_joints(ee_pose_1_global, arm_l_pose, q0[idx_q_a_l], True, "ur5e")
             joints_l = get_best_joint_configurations(all_joints_l, q0, idx_a_l, idx_q_a_l)
-            all_joints_r = utils.get_joints(wrist_pose_2_global, arm_r_pose, q0[idx_q_a_r], True, "ur5e")
+            all_joints_r = utils.get_joints(ee_pose_2_global, arm_r_pose, q0[idx_q_a_r], True, "ur5e")
             joints_r = get_best_joint_configurations(all_joints_r, q0, idx_a_r, idx_q_a_r)
 
             if joints_l is None or joints_r is None:
                 # First fail, try swapping contacts
-                wrist_pose_1_global, wrist_pose_2_global = wrist_pose_2_global, wrist_pose_1_global
+                ee_pose_1_global, ee_pose_2_global = ee_pose_2_global, ee_pose_1_global
                 
-                all_joints_l = utils.get_joints(wrist_pose_1_global, arm_l_pose, q0[idx_q_a_l], True, "ur5e")
+                all_joints_l = utils.get_joints(ee_pose_1_global, arm_l_pose, q0[idx_q_a_l], True, "ur5e")
                 joints_l = get_best_joint_configurations(all_joints_l, q0, idx_a_l, idx_q_a_l)
-                all_joints_r = utils.get_joints(wrist_pose_2_global, arm_r_pose, q0[idx_q_a_r], True, "ur5e")
+                all_joints_r = utils.get_joints(ee_pose_2_global, arm_r_pose, q0[idx_q_a_r], True, "ur5e")
                 joints_r = get_best_joint_configurations(all_joints_r, q0, idx_a_r, idx_q_a_r)
 
                 if joints_l is None or joints_r is None:
@@ -511,4 +514,4 @@ class MagicContactSampler(ContactSampler):
         raise Exception("Failed to sample Contact points")
     
 contact_sampler = MagicContactSampler()
-contact_sampler.flip_axis_prob = 0.0
+contact_sampler.flip_axis_prob = 0.3

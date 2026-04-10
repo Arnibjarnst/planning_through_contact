@@ -1,7 +1,7 @@
 import argparse
 import numpy as np
 
-from box_lift_setup import *
+from box_push_setup import *
 
 parser = argparse.ArgumentParser()
 parser.add_argument("traj_path", type=str)

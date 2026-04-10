@@ -158,12 +158,6 @@ rrt_params.log_barrier_weight_for_bundling = 1000
 
 rrt_params.use_free_solvers = False
 
-def robot_state_clamp(q_a):
-    return q_a, False
-
-
-rrt_params.robot_state_clamp_func = robot_state_clamp
-
 class MagicContactSampler(ContactSampler):
     def __init__(self):
         super().__init__(q_sim, q_sim_py)

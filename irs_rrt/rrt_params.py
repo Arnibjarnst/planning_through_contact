@@ -39,9 +39,6 @@ class RrtParams:
         #  the results in the TR-O paper. But it should be set to True for
         #  hardware demos, such as the iiwa_bimanual example.
         self.enforce_robot_joint_limits = False
-        
-        # returns the clamped state + boolean wether clamping was done or not
-        self.robot_state_clamp_func = lambda x: x, False
 
 
 class IrsRrtParams(RrtParams):
@@ -122,4 +119,14 @@ class IrsRrtTrajectoryParams(IrsRrtParams):
         self.connect_from_behind = True
         # Filter out lower t when adding new nodes
         self.connect_to_front = True
+
+        self.step_in = True
+
+        # Dict mapping model name -> [qw,qx,qy,qz,x,y,z] arm base pose
+        # Used by step_in for Jacobian-based contact push and cast_to_cone
+        self.arm_poses = {}
+
+        # Distance from wrist to EEF contact point along wrist z-axis.
+        # 0.02 for sphere EEF (ur5e_sphere.sdf), 0.0 for bare wrist (ur5e.sdf).
+        self.eef_offset = 0.02
 
