@@ -85,7 +85,8 @@ pose_sampling_function = get_obj_pose_from_t
 goal_u = pose_sampling_function(t1)
 
 # data collection.
-data_folder = "ptc_data/box_lift_ur5e"
+_repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+data_folder = os.path.join(_repo_root, "ptc_data", "box_lift_ur5e")
 
 q_parser = QuasistaticParser(q_model_path)
 q_vis = QuasistaticVisualizer.make_visualizer(q_parser)
@@ -143,44 +144,46 @@ q0 = q_sim.get_q_vec_from_dict(q0_dict)
 
 
 rrt_params = IrsRrtTrajectoryParams(q_model_path, joint_limits)
-rrt_params.smoothing_mode = SmoothingMode.k1AnalyticIcecream
+
+# Tree structure
 rrt_params.root_node = IrsTrajectoryNode(q0)
 rrt_params.max_size = 50000
 rrt_params.goal = np.zeros(dim_x)
 rrt_params.goal[idx_q_u] = goal_u
 rrt_params.termination_tolerance = 0.1
+
+# Subgoal / trajectory
 rrt_params.subgoal_ts = [0.0, 0.5, 1.0]
 rrt_params.subgoal_tolerance = 0.2
 rrt_params.goal_as_subgoal_prob = 0.4
-rrt_params.enforce_robot_joint_limits = True
-rrt_params.quat_metric = 5
-rrt_params.distance_threshold = np.inf
-rrt_params.regularization = 1e-3
-# Randomized Parameters:
-rrt_params.std_u = 0.1 * np.ones(6)
-rrt_params.n_samples = 100
 
-rrt_params.du_star_mode = DuStarMode.ConstrainedLSTSQ
-rrt_params.stepsize = 0.1
-rrt_params.rewire = False
+# Distance / metrics
 rrt_params.distance_metric = "local_u"
-rrt_params.grasp_prob = 0.2
-rrt_params.h = 1.0 / 10.0
-rrt_params.log_barrier_weight_for_bundling = 1000
-
+rrt_params.distance_threshold = np.inf
+rrt_params.quat_metric = 5
+rrt_params.regularization = 1e-3
+rrt_params.obj_dims = object_dims
 rrt_params.max_static_angle_diff = 0.005
 rrt_params.max_static_pos_diff = 0.005
 
-rrt_params.obj_dims = object_dims 
+# Dynamics / stepping
+rrt_params.h = 1.0 / 10.0
+rrt_params.stepsize = 0.1
+rrt_params.smoothing_mode = SmoothingMode.k1AnalyticIcecream
+rrt_params.du_star_mode = DuStarMode.ConstrainedLSTSQ
+rrt_params.log_barrier_weight_for_bundling = 1000
 
+# Sampling
 rrt_params.batch_size = 32
 rrt_params.initial_contact_samples = 128
+rrt_params.grasp_prob = 0.2
 
-rrt_params.use_free_solvers = False
-
+# Robot / contact
 rrt_params.arm_poses = {eef_l_name: arm_l_pose, eef_r_name: arm_r_pose}
-rrt_params.arm_l_pose = arm_l_pose
-rrt_params.arm_r_pose = arm_r_pose
+rrt_params.enforce_robot_joint_limits = True
+
+# Solver
+rrt_params.use_free_solvers = False
 
 def get_best_joint_configurations(joint_configs, q_, model_idx, joint_idx):
     q = np.copy(q_)
@@ -488,18 +491,18 @@ class MagicContactSampler(ContactSampler):
             if ee_pos_1_to_arm_r + ee_pos_2_to_arm_l < ee_pos_1_to_arm_l + ee_pos_2_to_arm_r:
                 ee_pose_1_global, ee_pose_2_global = ee_pose_2_global, ee_pose_1_global
 
-            all_joints_l = utils.get_joints(ee_pose_1_global, arm_l_pose, q0[idx_q_a_l], True, "ur5e")
+            all_joints_l = utils.get_joints(ee_pose_1_global, arm_l_pose, q0[idx_q_a_l], True)
             joints_l = get_best_joint_configurations(all_joints_l, q0, idx_a_l, idx_q_a_l)
-            all_joints_r = utils.get_joints(ee_pose_2_global, arm_r_pose, q0[idx_q_a_r], True, "ur5e")
+            all_joints_r = utils.get_joints(ee_pose_2_global, arm_r_pose, q0[idx_q_a_r], True)
             joints_r = get_best_joint_configurations(all_joints_r, q0, idx_a_r, idx_q_a_r)
 
             if joints_l is None or joints_r is None:
                 # First fail, try swapping contacts
                 ee_pose_1_global, ee_pose_2_global = ee_pose_2_global, ee_pose_1_global
                 
-                all_joints_l = utils.get_joints(ee_pose_1_global, arm_l_pose, q0[idx_q_a_l], True, "ur5e")
+                all_joints_l = utils.get_joints(ee_pose_1_global, arm_l_pose, q0[idx_q_a_l], True)
                 joints_l = get_best_joint_configurations(all_joints_l, q0, idx_a_l, idx_q_a_l)
-                all_joints_r = utils.get_joints(ee_pose_2_global, arm_r_pose, q0[idx_q_a_r], True, "ur5e")
+                all_joints_r = utils.get_joints(ee_pose_2_global, arm_r_pose, q0[idx_q_a_r], True)
                 joints_r = get_best_joint_configurations(all_joints_r, q0, idx_a_r, idx_q_a_r)
 
                 if joints_l is None or joints_r is None:

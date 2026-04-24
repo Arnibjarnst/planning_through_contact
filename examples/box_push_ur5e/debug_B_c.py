@@ -118,9 +118,9 @@ def cast_to_cone(joints, normal, arm_pose_val, deg):
 
     ee_pose_new = np.concatenate([ee_quat_new.wxyz(), ee_pose[4:]])
 
-    joints_new = utils.get_joints(ee_pose_new, arm_pose_val, joints, robot='ur5e', eef_offset=eef_offset)
+    joints_new = utils.get_joints(ee_pose_new, arm_pose_val, joints, eef_offset=eef_offset)
 
-    print(ee_pose, utils.get_ee_pose(joints_new, arm_pose_val, 'ur5e', eef_offset=eef_offset), ee_pose_new)
+    print(ee_pose, utils.get_ee_pose(joints_new, arm_pose_val, eef_offset=eef_offset), ee_pose_new)
 
     return joints_new
 
@@ -179,7 +179,7 @@ def step_in(q):
         qdot = np.linalg.pinv(J_a).dot(min_dist * -min_normal[:2])
 
         q_next[idx_q_a] += qdot
-        q_next[idx_q_a] = cast_to_cone(q_next[idx_q_a], min_normal, arm_pose, 30)
+        # q_next[idx_q_a] = cast_to_cone(q_next[idx_q_a], min_normal, arm_pose, 30)
 
     return q_next
 

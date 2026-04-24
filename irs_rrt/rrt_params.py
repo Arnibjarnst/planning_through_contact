@@ -130,3 +130,13 @@ class IrsRrtTrajectoryParams(IrsRrtParams):
         # 0.02 for sphere EEF (ur5e_sphere.sdf), 0.0 for bare wrist (ur5e.sdf).
         self.eef_offset = 0.02
 
+        self.regrasp_cooldown = 5
+
+        # Stickiness: penalizes relative EE-box movement in the LSTSQ.
+        # 0.0 = off. Scaled by residual norm at solve time.
+        self.stickiness_scale_angular = 0.0
+        self.stickiness_scale_linear = 0.0
+
+        # Name of the EE body in the URDF/SDF (same name per arm instance)
+        self.ee_body_name = "ee_link"
+

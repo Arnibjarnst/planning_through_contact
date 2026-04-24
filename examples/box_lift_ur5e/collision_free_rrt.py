@@ -413,6 +413,15 @@ u_knots_trimmed = data["u_trj"]
 # Inherit the input file's rate so refined trajectories don't get clobbered.
 h_input = float(data["h"]) if "h" in data.files else rrt_params.h
 
+# Natural format: len(q) == len(u) + 1. Old format had len(q) == len(u);
+# strip the trailing hold u so old files end up in the same shape.
+if len(u_knots_trimmed) == len(q_knots_trimmed):
+    u_knots_trimmed = u_knots_trimmed[:-1]
+elif len(q_knots_trimmed) != len(u_knots_trimmed) + 1:
+    raise ValueError(
+        f"Unexpected q/u length relation: {len(q_knots_trimmed)} vs {len(u_knots_trimmed)}"
+    )
+
 segments = IrsRrt.get_regrasp_segments(u_knots_trimmed)
 
 q_knots_ref_list = []
@@ -587,6 +596,11 @@ u_knots_patched_list.append(u_knots_ref_list[-1])
 q_trj_final = np.concatenate(q_knots_patched_list)
 u_trj_final = np.concatenate(u_knots_patched_list)
 
+# Save in the natural len(q) == len(u) + 1 format.
+assert len(q_trj_final) == len(u_trj_final) + 1, (
+    f"Expected len(q) == len(u) + 1, got {len(q_trj_final)} vs {len(u_trj_final)}"
+)
+
 q_vis.publish_trajectory(q_trj_final, h_input)
 
 
@@ -597,11 +611,12 @@ output_path = os.path.join(data_folder, new_filename)
 
 print(f"Saved full trajectory to {output_path}")
 
-np.savez_compressed(
-    output_path,
-    q_trj               = q_trj_final,
-    u_trj               = u_trj_final,
-    h                   = h_input,
-    q_u_indices_into_x  = idx_q_u,
-    q_a_indices_into_x  = idx_q_a,
-)
+# Copy all fields from the input npz and overwrite what we changed.
+out = {k: data[k] for k in data.files}
+out["q_trj"] = q_trj_final
+out["u_trj"] = u_trj_final
+out["h"] = h_input
+out["q_u_indices_into_x"] = idx_q_u
+out["q_a_indices_into_x"] = idx_q_a
+
+np.savez_compressed(output_path, **out)

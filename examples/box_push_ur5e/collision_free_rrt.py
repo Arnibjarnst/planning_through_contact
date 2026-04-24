@@ -289,13 +289,15 @@ u_knots_trimmed = data["u_trj"]
 # don't get clobbered with the planner's default rate.
 h_input = float(data["h"]) if "h" in data.files else rrt_params.h
 
-# The planner now appends a "hold" action so len(u) == len(q). Strip it
-# here so the segment-based patching logic (which expects len(u) == len(q) - 1)
-# still works, then re-append at the end.
-hold_u = None
+# Natural format: len(q) == len(u) + 1. Old format had len(q) == len(u);
+# strip the trailing hold u so old files end up in the same shape.
 if len(u_knots_trimmed) == len(q_knots_trimmed):
-    hold_u = u_knots_trimmed[-1].copy()
+    # Old format: drop the trailing hold action
     u_knots_trimmed = u_knots_trimmed[:-1]
+elif len(q_knots_trimmed) != len(u_knots_trimmed) + 1:
+    raise ValueError(
+        f"Unexpected q/u length relation: {len(q_knots_trimmed)} vs {len(u_knots_trimmed)}"
+    )
 
 segments = IrsRrt.get_regrasp_segments(u_knots_trimmed)
 
@@ -332,7 +334,7 @@ for n in range(len(q_knots_ref_list) - 1):
     cf_params.root_node = CFNode(qa_in)
     cf_params.termination_tolerance = 1e-3
     cf_params.goal_as_subgoal_prob = 0.1
-    cf_params.stepsize = rrt_params.stepsize
+    cf_params.stepsize = 0.5 * h_input # Good for ur5e
     cf_params.max_size = 200000
     cf_params.h = h_input
 
@@ -345,7 +347,8 @@ for n in range(len(q_knots_ref_list) - 1):
 
     # Move slowly out of contact
     step_in_size = np.linalg.norm((qin - q_start)[idx_q_a])
-    step_in_frames = 1 + int(np.ceil(step_in_size / cf_params.stepsize))
+    # step_in_frames = 1 + int(np.ceil(step_in_size / cf_params.stepsize))
+    step_in_frames = 5 # Slower step in
     patch_trj = np.vstack(
         (patch_trj, np.linspace(q_start, qin, step_in_frames))
     )
@@ -353,7 +356,8 @@ for n in range(len(q_knots_ref_list) - 1):
 
     # Move slowly into contact
     step_out_size = np.linalg.norm((qout - q_end)[idx_q_a])
-    step_out_frames = 1 + int(np.ceil(step_out_size / cf_params.stepsize))
+    # step_out_frames = 1 + int(np.ceil(step_out_size / cf_params.stepsize))
+    step_out_frames = 5 # Slower step out
     patch_trj = np.vstack(
         (patch_trj, np.linspace(qout, q_end, step_out_frames))
     )
@@ -374,12 +378,9 @@ u_knots_patched_list.append(u_knots_ref_list[-1])
 q_trj_final = np.concatenate(q_knots_patched_list)
 u_trj_final = np.concatenate(u_knots_patched_list)
 
-# Re-append the hold action so the saved file again has len(u) == len(q).
-if hold_u is not None:
-    u_trj_final = np.vstack([u_trj_final, hold_u[None, :]])
-
-assert len(q_trj_final) == len(u_trj_final), (
-    f"q_trj and u_trj length mismatch: {len(q_trj_final)} vs {len(u_trj_final)}"
+# Save in the natural len(q) == len(u) + 1 format.
+assert len(q_trj_final) == len(u_trj_final) + 1, (
+    f"Expected len(q) == len(u) + 1, got {len(q_trj_final)} vs {len(u_trj_final)}"
 )
 
 q_vis.publish_trajectory(q_trj_final, h_input)
@@ -392,11 +393,12 @@ output_path = os.path.join(data_folder, new_filename)
 
 print(f"Saved full trajectory to {output_path}")
 
-np.savez_compressed(
-    output_path,
-    q_trj               = q_trj_final,
-    u_trj               = u_trj_final,
-    h                   = h_input,
-    q_u_indices_into_x  = idx_q_u,
-    q_a_indices_into_x  = idx_q_a,
-)
+# Copy all fields from the input npz and overwrite what we changed.
+out = {k: data[k] for k in data.files}
+out["q_trj"] = q_trj_final
+out["u_trj"] = u_trj_final
+out["h"] = h_input
+out["q_u_indices_into_x"] = idx_q_u
+out["q_a_indices_into_x"] = idx_q_a
+
+np.savez_compressed(output_path, **out)

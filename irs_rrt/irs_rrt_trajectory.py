@@ -41,6 +41,7 @@ class IrsTrajectoryNode(IrsNode):
         self.is_static = False
 
         self.is_active = True
+        self.extensions_since_regrasp = 0
 
 class IrsRrtTrajectory(IrsRrt):
     def __init__(
@@ -208,7 +209,7 @@ class IrsRrtTrajectory(IrsRrt):
             i += 1
             if self.rrt_params.connect_from_behind and node.t > max_t:
                 continue
-            if node.is_static and node.is_active:
+            if node.is_static and node.is_active and node.extensions_since_regrasp >= self.rrt_params.regrasp_cooldown:
                 if print_distance:
                     print("closest distance to subgoal", d_batch[i_min[i]])
                 selected_nodes.append(node)
@@ -229,7 +230,75 @@ class IrsRrtTrajectory(IrsRrt):
         pose_batch = self.get_q_matrix_up_to()[:, self.q_u_indices_into_x]
         q_pose = q[self.q_u_indices_into_x]
         return np.min(self.calc_distance_batch_corners(q_pose, pose_batch))
-    
+
+    def find_node_closest_to_goal(self):
+        """
+        Override the base-class Mahalanobis metric with the 8-corner
+        distance metric used by the termination check in `iterate`, so that
+        the "closest node" seen by the saved trajectory agrees with the
+        node that actually triggered termination.
+
+        Without this override, `select_closest_node` uses the local
+        Mahalanobis metric (rrt_params.distance_metric = "local_u"), which
+        can pick a different node than the one that minimizes the corner
+        distance — leaving the final saved state further from the goal
+        than the termination_tolerance would suggest.
+        """
+        pose_batch = self.get_q_matrix_up_to()[:, self.q_u_indices_into_x]
+        q_pose = self.rrt_params.goal[self.q_u_indices_into_x]
+        d_batch = self.calc_distance_batch_corners(q_pose, pose_batch)
+        i_min = int(np.argmin(d_batch))
+        print(
+            f"find_node_closest_to_goal: corner dist = {d_batch[i_min]:.5f} "
+            f"(node {i_min})"
+        )
+        return self.get_node_from_id(i_min)
+
+    def get_trimmed_q_and_u_knots_to_goal(self):
+        """
+        Override the base-class version with two changes:
+          1. Final-node selection uses the 8-corner distance metric (via
+             our overridden `find_node_closest_to_goal`) so it agrees with
+             the termination check in `iterate`.
+          2. Appends one extra "go-to-goal" action at the end and the
+             corresponding post-state, so `len(q_knots) == len(u_knots) + 1`.
+             The extra action is computed at the goal-closest node via the
+             bundled gradient dynamics + configured du* mode, with the target
+             set to the RRT goal, so any residual offset between the final
+             node and the goal is corrected on the last step. The post-state
+             is computed by forward-simulating that action so consumers do
+             not need to reconstruct it.
+        """
+        final_node = self.find_node_closest_to_goal()
+        node_idx_path = np.array(self.trace_nodes_to_root_from(final_node.id))
+
+        q_knots = self.q_matrix[node_idx_path]
+        u_knots = self.get_u_knots_from_node_idx_path(node_idx_path)
+
+        node_idx_path_to_keep = self.trim_regrasps(u_knots)
+        q_knots_trimmed = q_knots[node_idx_path_to_keep]
+        u_knots_trimmed = u_knots[node_idx_path_to_keep[1:]]
+
+        # Append a final go-to-goal action and its post-state. After this
+        # block, len(q_knots_trimmed) == len(u_knots_trimmed) + 1, which is
+        # the natural MPC convention. Using the configured du* mode keeps
+        # this consistent with the rest of the planned trajectory's
+        # extension steps.
+        du_star = self.calc_du_star_towards_q(final_node, self.rrt_params.goal)
+        u_star = final_node.ubar + du_star
+        u_knots_trimmed = np.concatenate(
+            [u_knots_trimmed, u_star[None, :]], axis=0
+        )
+        # Forward-simulate u_star to get the post-state and append it.
+        q_post_star = self.q_sim.calc_dynamics(
+            q_knots_trimmed[-1], u_star, self.sim_params
+        )
+        q_knots_trimmed = np.concatenate(
+            [q_knots_trimmed, q_post_star[None, :]], axis=0
+        )
+
+        return q_knots_trimmed, u_knots_trimmed
+
     def cast_to_cone(self, joints, normal, arm_pose, deg):
         rad = np.deg2rad(deg)
         eef_offset = self.rrt_params.eef_offset
@@ -253,7 +322,7 @@ class IrsRrtTrajectory(IrsRrt):
         ee_pose_new = np.concatenate([ee_quat_new.wxyz(), ee_pose[4:]])
 
         # TODO: get all configurations and filter
-        joints_new = utils.get_joints(ee_pose_new, arm_pose, joints, robot='ur5e', eef_offset=eef_offset)
+        joints_new = utils.get_joints(ee_pose_new, arm_pose, joints, eef_offset=eef_offset)
 
         return joints_new
     
@@ -319,9 +388,9 @@ class IrsRrtTrajectory(IrsRrt):
                 qdot = np.linalg.pinv(J_a).dot(min_dist * -min_normal[:2])
 
                 q_next[joint_indices] += qdot
-                q_next[joint_indices] = self.cast_to_cone(
-                    q_next[joint_indices], min_normal, arm_pose, 30
-                )
+                # q_next[joint_indices] = self.cast_to_cone(
+                #     q_next[joint_indices], min_normal, arm_pose, 30
+                # )
 
         return q_next
     
@@ -462,8 +531,6 @@ class IrsRrtTrajectory(IrsRrt):
         q_a_ub = self.q_ub[idx_robot]
         B_obj = parent_node.Bhat[idx_obj, :]
 
-        # We need |A * x - b| ^2 + epsilon * |x|^2, but MathematicalProgram
-        # requires every term in the quadratic cost to be PD.
         Q = B_obj.T @ B_obj + 1e-2 * np.eye(n_a)
         b = (q - parent_node.chat)[idx_obj]
         b_combined = -B_obj.T @ b
@@ -495,7 +562,6 @@ class IrsRrtTrajectory(IrsRrt):
             rcond=None,
         )[0]
 
-        # Normalize least-squares solution.
         du_norm = np.linalg.norm(du_star)
         step_size = min(du_norm, self.rrt_params.stepsize)
         du_star = du_star / du_norm
@@ -512,16 +578,71 @@ class IrsRrtTrajectory(IrsRrt):
     def calc_du_star_towards_q_diff(self, parent_node: Node, q: np.ndarray):
         idxs_a = self.q_sim.get_q_a_indices_into_q()
         du_star = q[idxs_a] - parent_node.q[idxs_a]
-        
+
         du_norm = np.linalg.norm(du_star)
         step_size = min(du_norm, self.rrt_params.stepsize)
         du_star = du_star * step_size / du_norm
 
         return du_star
 
+    def build_stickiness_block(self, parent_node: Node, A_box, lam_rotate=1.0, lam_slide=1.0):
+        """
+        Build stickiness rows that penalize relative EE-box twist.
+        A_box: (6, n_a) tangent-space box Jacobian [angular; translational].
+        lam_rotate: scale for the angular (first 3) rows.
+        lam_slide: scale for the translational (last 3) rows.
+        Returns (A_stick, b_stick) with shape (6*n_arms, n_a) and (6*n_arms,).
+        """
+        self.q_sim_py.update_mbp_positions_from_vector(parent_node.q)
+        ctx = self.q_sim_py.context_plant
+
+        A_rows = []
+        b_rows = []
+        n_a = len(self.q_a_indices_into_x)
+        ee_name = self.rrt_params.ee_body_name
+        scale = np.array([lam_rotate]*3 + [lam_slide]*3)
+
+        for arm in self.arms:
+            model_idx = arm['model_idx']
+            joint_indices = arm['joint_indices']
+
+            ee_body = self.py_plant.GetBodyByName(ee_name, model_idx)
+            J_ee_full = self.py_plant.CalcJacobianSpatialVelocity(
+                ctx,
+                JacobianWrtVariable.kV,
+                ee_body.body_frame(),
+                np.zeros(3),
+                self.py_plant.world_frame(),
+                self.py_plant.world_frame(),
+            )
+            # Build a (6, n_a) matrix with only this arm's columns nonzero
+            J_ee_a = np.zeros((6, n_a))
+            J_ee_a[:, joint_indices - self.q_a_indices_into_x[0]] = J_ee_full[:, joint_indices]
+
+            rel_J = (J_ee_a - A_box) * scale[:, None]
+            A_rows.append(rel_J)
+            b_rows.append(np.zeros(6))
+
+        return np.vstack(A_rows), np.concatenate(b_rows)
+
+    def bhat_to_tangent(self, Bhat, chat):
+        """Convert Bhat unactuated rows from 7D quat-space to 6D tangent-space."""
+        idx_u = self.q_u_indices_into_x
+        w, x, y, z = chat[idx_u[:4]]
+        ET = 2.0 * np.array([
+            [-x,  w,  z, -y],
+            [-y, -z,  w,  x],
+            [-z,  y, -x,  w],
+        ])
+        J_ang = ET @ Bhat[idx_u[:4], :]
+        J_pos = Bhat[idx_u[4:], :]
+        return np.vstack([J_ang, J_pos])
+
     def calc_du_star_towards_q_constrained_lstsq(self, parent_node: Node, q: np.ndarray):
         """
-        Solve min ||Ax - b|| subject to ||x|| <= d.
+        Solve min ||Ax - b|| subject to ||Wx|| <= d,
+        where W = diag(du_weights) penalizes specific joints.
+        Optionally augments with stickiness rows.
         """
         tol = 1e-10
         max_iter = 100
@@ -529,40 +650,52 @@ class IrsRrtTrajectory(IrsRrt):
         A = parent_node.Bhat_u
         b = (q[self.q_u_indices_into_x] - parent_node.chat_u)
 
+        lam_ang = self.rrt_params.stickiness_scale_angular
+        lam_lin = self.rrt_params.stickiness_scale_linear
+        if lam_ang > 0 or lam_lin > 0:
+            A_box_tangent = self.bhat_to_tangent(parent_node.Bhat, parent_node.chat)
+            residual = np.linalg.norm(b)
+            A_stick, b_stick = self.build_stickiness_block(
+                parent_node, A_box_tangent,
+                lam_slide=lam_lin * residual,
+                lam_rotate=lam_ang * residual,
+            )
+            A = np.vstack([A, A_stick])
+            b = np.concatenate([b, b_stick])
+
+        n_a = A.shape[1]
         AtA = A.T @ A
         Atb = A.T @ b
 
         try:
-            # Unconstrained LS solution
             x0 = np.linalg.solve(AtA, Atb)
             if np.linalg.norm(x0) <= self.rrt_params.stepsize:
-                return x0  # constraint inactive
+                return x0
         except:
             pass
-                
+
         lam_low, lam_high = 0, 1.0
-        
-        # Increase lam_high until norm(x) < stepsize
+        I = np.eye(n_a)
+
         for _ in range(50):
-            x = np.linalg.solve(AtA + lam_high * np.eye(A.shape[1]), Atb)
+            x = np.linalg.solve(AtA + lam_high * I, Atb)
             if np.linalg.norm(x) < self.rrt_params.stepsize:
                 break
             lam_high *= 2
-        
-        # Binary search λ
+
         for _ in range(max_iter):
             lam = 0.5 * (lam_low + lam_high)
-            x = np.linalg.solve(AtA + lam * np.eye(A.shape[1]), Atb)
-            
+            x = np.linalg.solve(AtA + lam * I, Atb)
+
             if np.linalg.norm(x) > self.rrt_params.stepsize:
                 lam_low = lam
             else:
                 lam_high = lam
-            
+
             if lam_high - lam_low < tol:
                 break
-            
-        return x 
+
+        return x
     
     def calc_du_star_towards_q(self, parent_node: Node, q: np.ndarray):
         if self.rrt_params.du_star_mode == DuStarMode.EEFDiff:
@@ -579,21 +712,6 @@ class IrsRrtTrajectory(IrsRrt):
         return du_star
     
 
-    def get_trimmed_q_and_u_knots_to_goal_with_hold(self):
-        """
-        Like `get_trimmed_q_and_u_knots_to_goal`, but appends one extra
-        action at the end of u so that `len(u) == len(q)`. The extra
-        action is computed at the goal-closest node via the bundled
-        gradient dynamics and the configured du* mode, with the target
-        set to the RRT goal — so any residual offset between the final
-        node and the goal gets corrected on the last step.
-        """
-        q_knots, u_knots = self.get_trimmed_q_and_u_knots_to_goal()
-        final_node = self.find_node_closest_to_goal()
-        du_star = self.calc_du_star_towards_q(final_node, self.rrt_params.goal)
-        u_star = final_node.ubar + du_star
-        u_knots = np.concatenate([u_knots, u_star[None, :]], axis=0)
-        return q_knots, u_knots
 
     def sample_contact(self, parent_node: Node):
         """
@@ -641,6 +759,7 @@ class IrsRrtTrajectory(IrsRrt):
         child_node = IrsTrajectoryNode(x_next)
         child_node.subgoal = q
         child_node.contact_mode_id = parent_node.contact_mode_id
+        child_node.extensions_since_regrasp = parent_node.extensions_since_regrasp + 1
         child_node.is_static = self.is_static(x_next)
 
         child_node.t, child_node.distance_from_traj = self.closest_t_in_trajectory(x_next[self.q_u_indices_into_x])

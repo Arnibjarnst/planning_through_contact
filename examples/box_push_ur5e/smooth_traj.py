@@ -87,7 +87,23 @@ u_trj_original = data["u_trj"]
 h = float(data["h"])
 fs = 1.0 / h  # sample rate
 
-print(f"Loaded {len(q_trj_original)} knots @ {fs:.1f} Hz")
+# Backward-compat: convert old format len(q) == len(u) to natural format
+# len(q) == len(u) + 1 by appending the post-state of the last u.
+if len(q_trj_original) == len(u_trj_original):
+    print("Detected old trajectory format; appending post-state.")
+    sim_params_legacy = copy.deepcopy(q_sim.get_sim_params())
+    sim_params_legacy.h = h
+    q_post_last = q_sim.calc_dynamics(
+        q_trj_original[-1], u_trj_original[-1], sim_params_legacy
+    )
+    q_trj_original = np.concatenate(
+        [q_trj_original, q_post_last[None, :]], axis=0
+    )
+assert len(q_trj_original) == len(u_trj_original) + 1, (
+    f"Expected len(q) == len(u) + 1, got {len(q_trj_original)} vs {len(u_trj_original)}"
+)
+
+print(f"Loaded {len(u_trj_original)} actions @ {fs:.1f} Hz")
 
 segments = IrsRrt.get_regrasp_segments(u_trj_original)
 print(f"Found {len(segments)} contact segments: {segments}")
@@ -124,7 +140,7 @@ def smooth_savgol(u, window, polyorder):
 def smooth_iir(u, design_fn, order, cutoff_hz, fs):
     """Generic zero-phase IIR low-pass via filtfilt."""
     n = len(u)
-    if n < 3 * order + 1:
+    if n < 3 * order + 3:
         # filtfilt has a minimum-length requirement; skip if too short.
         return u.copy()
     # Normalize cutoff to Nyquist (fs/2)
@@ -245,17 +261,16 @@ sim_params.h = h
 def rollout(u_trj, q0):
     """
     Roll out the quasistatic dynamics from q0 following u_trj.
-    NaN action rows are skipped (q is passed through unchanged from the
-    original RRT q_trj at those indices). Returns q of the same length
-    as u_trj — the planner now produces q_trj and u_trj of matching
-    length (a hold action is appended at the end of u_trj).
+    NaN action rows are passed through (q jumps to the post-regrasp state
+    from the original q_trj). Returns q of length T+1 (natural MPC format).
     """
     T = len(u_trj)
-    q = np.zeros((T, q0.shape[0]))
+    q = np.zeros((T + 1, q0.shape[0]))
     q[0] = q0
     q_curr = q0.copy()
-    for t in range(T - 1):
+    for t in range(T):
         if np.any(np.isnan(u_trj[t])):
+            # Regrasp: jump to post-regrasp state from the reference
             q_curr = q_trj_original[t + 1].copy()
             q[t + 1] = q_curr
             continue
@@ -271,12 +286,6 @@ q0 = q_trj_original[0]
 # the integration error of the quasistatic simulator itself).
 q_trj_original_rerolled = rollout(u_trj_original, q0)
 
-
-print(q_trj_original[:, -3])
-print(q_trj_original.shape, u_trj_original.shape)
-
-while True:
-    pass
 
 q_rerolled_by_method = {}
 for name, u_s in u_smoothed_by_method.items():

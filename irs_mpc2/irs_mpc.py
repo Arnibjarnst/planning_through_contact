@@ -7,7 +7,6 @@ from pydrake.all import (
     ModelInstanceIndex,
     GurobiSolver,
     OsqpSolver,
-    PiecewisePolynomial,
 )
 
 from qsim.parser import QuasistaticParser
@@ -58,6 +57,12 @@ class IrsMpcQuasistatic:
         self.Q = self.get_Q_mat_from_Q_dict(self.Q_dict)
         self.Qd = self.get_Q_mat_from_Q_dict(self.Qd_dict)
         self.R = self.get_R_mat_from_R_dict(self.R_dict)
+        # Acceleration cost (optional) — penalizes d^2u = u_t - 2*u_{t-1} + u_{t-2}
+        self.R_accel_dict = getattr(params, "R_accel_dict", None)
+        if self.R_accel_dict is not None:
+            self.R_accel = self.get_R_mat_from_R_dict(self.R_accel_dict)
+        else:
+            self.R_accel = None
         self.x_bounds_abs = params.x_bounds_abs
         self.u_bounds_abs = params.u_bounds_abs
         self.x_bounds_rel = params.x_bounds_rel
@@ -205,12 +210,22 @@ class IrsMpcQuasistatic:
                 Q_dict=self.Q_dict,
             )
 
-            # R cost.
+            # R cost (velocity penalty).
             if t == 0:
                 du = u_trj[t] - x_trj[t, self.indices_u_into_x]
             else:
                 du = u_trj[t] - u_trj[t - 1]
             cost_R += du @ self.R @ du
+
+            # R_accel cost (acceleration penalty).
+            if self.R_accel is not None:
+                if t == 0:
+                    d2u = u_trj[t] - x_trj[t, self.indices_u_into_x]
+                elif t == 1:
+                    d2u = u_trj[t] - 2 * u_trj[t - 1] + x_trj[0, self.indices_u_into_x]
+                else:
+                    d2u = u_trj[t] - 2 * u_trj[t - 1] + u_trj[t - 2]
+                cost_R += d2u @ self.R_accel @ d2u
 
         return cost_Qu, cost_Qu_final, cost_Qa, cost_Qa_final, cost_R
 
@@ -555,6 +570,10 @@ class IrsMpcQuasistatic:
             u_bounds_rel[1] = self.u_bounds_rel[1]
 
         for t in range(self.T):
+            # Pass prior u values for d2u boundary condition
+            u_prev_1 = u_trj_new[t - 1] if t >= 1 else None
+            u_prev_2 = u_trj_new[t - 2] if t >= 2 else None
+
             x_star, u_star = solve_mpc(
                 At=self.A_trj[t : self.T],
                 Bt=self.B_trj[t : self.T],
@@ -580,6 +599,9 @@ class IrsMpcQuasistatic:
                 else None,
                 xinit=None,
                 uinit=None,
+                R_accel=self.R_accel,
+                u_prev_1=u_prev_1,
+                u_prev_2=u_prev_2,
             )
             u_trj_new[t] = u_star[0]
 
@@ -629,7 +651,7 @@ class IrsMpcQuasistatic:
         q_trj_small = np.zeros((T * n_steps_per_h + 1, len(x0)))
         q_trj_small[0] = x0
         u_trj_small = IrsMpcQuasistatic.calc_u_trj_small(
-            u_trj, h_small, n_steps_per_h
+            u_trj, n_steps_per_h
         )
         for t in range(n_steps_per_h * T):
             q_trj_small[t + 1] = q_sim.calc_dynamics(
@@ -639,21 +661,32 @@ class IrsMpcQuasistatic:
         return q_trj_small, u_trj_small
 
     @staticmethod
-    def calc_u_trj_small(u_trj: np.ndarray, h_small: float, n_steps_per_h: int):
-        T = len(u_trj)
-        # Note! PiecewisePolynomial.ZeroOrderHold ignores the last knot point.
-        # So we need to append a useless row.
-        t_trj = np.arange(T + 1) * h_small * n_steps_per_h
-        u_trj_poly = PiecewisePolynomial.ZeroOrderHold(
-            t_trj, np.vstack([u_trj, np.zeros(u_trj.shape[1])]).T
-        )
+    def calc_u_trj_small(
+        u_trj: np.ndarray,
+        n_steps_per_h: int,
+        method: str = "zoh",
+    ):
+        """Upsample u_trj to the inner rate.
 
-        return np.array(
-            [
-                u_trj_poly.value(h_small * (t + 0.01)).squeeze()
-                for t in range(n_steps_per_h * T)
-            ]
+        Thin wrapper over `scripts.utils.upsample_trj`. `method` is one of
+        "zoh", "foh", "cubic"; see `upsample_trj` for the method semantics.
+        No quat columns (joint-target controls).
+
+        Length convention: `upsample_trj` returns `(N-1)*k + 1` samples for
+        N input rows and `k = n_steps_per_h`, while this function's
+        historical output length is `T*k` where `T = len(u_trj)` (each input
+        row contributes k output rows). To bridge, we append a duplicate
+        last row so N = T + 1, upsample, and drop the trailing endpoint.
+        The trailing segment is consequently flat for FOH / cubic, matching
+        the legacy ZOH behavior at the end.
+        """
+        from scripts import utils
+
+        u_padded = np.vstack([u_trj, u_trj[-1]])
+        upsampled = utils.upsample_trj(
+            u_padded, n_steps_per_h=n_steps_per_h, method=method
         )
+        return upsampled[:-1]
 
     def iterate(self, max_iterations: int, cost_Qu_f_threshold: float = 0):
         """
@@ -706,28 +739,100 @@ class IrsMpcQuasistatic:
     def run_traj_opt_on_rrt_segment(
         self,
         n_steps_per_h: int,
-        h_small: float,
-        q0: np.ndarray,
-        q_final: np.ndarray,
+        q_trj: np.ndarray,
         u_trj: np.ndarray,
         max_iterations: int,
+        target_mode: str = "follow_trajectory",
+        interp_method: str = "foh",
     ):
         """
-        T0 = len(u_trj). This function constructs a new trajectory where each
-         knot in the original u_trj is expanded into n_steps_per_h knots.
-        Each new knot corresponds to a the new, smaller time step h_small,
-         which reduces the effect of "hydroplaning" in Anitescu's model.
-        """
-        indices_q_u_into_x = self.q_sim.get_q_u_indices_into_q()
-        q_u_d = q_final[indices_q_u_into_x]
-        q_d = np.copy(q0)
-        q_d[indices_q_u_into_x] = q_u_d
+        T0 = len(u_trj). Expand each knot of u_trj into n_steps_per_h inner
+        knots at time step h_small (reduces "hydroplaning" in Anitescu's
+        model), then refine with iMPC.
 
-        T = len(u_trj) * n_steps_per_h
-        q_trj_d = np.tile(q_d, (T + 1, 1))
+        Arguments:
+          q_trj: RRT state trail for the segment, shape (T0+1, dim_q).
+            q_trj[0] is the initial state x0; q_trj[-1] is the terminal
+            target. Callers that need to re-project q_trj[0] for
+            non-penetration or override q_trj[-1]'s object pose to the
+            global goal (final segment) should mutate q_trj before calling.
+          u_trj: RRT control backbone, shape (T0, dim_u).
+          
+          max_iterations: max iterations of optimization
+          target_mode: selects how q_trj_d (the desired-state reference the
+            Q running cost penalizes the rollout against) is built
+          "constant_final"        - every row = q_trj[0] with object pose
+                                    taken from q_trj[-1]. Rewards reaching
+                                    the goal ASAP (front-loads motion).
+          "interpolate_endpoints" - 2-knot FOH+SLERP interpolation from
+                                    q_trj[0] to q_trj[-1]; arms held at
+                                    q_trj[0]. Rewards uniform object
+                                    velocity. Intermediate RRT states
+                                    ignored.
+          "follow_trajectory"     - q_trj_d built by time-upsampling the
+                                    full q_trj using `interp_method` on
+                                    non-quaternion columns (quaternions
+                                    always SLERP). Use when segment object
+                                    motion is non-monotonic.
+
+        interp_method: one of "zoh", "foh", "cubic". Always applied to
+        u_trj upsampling; also applied to q_trj_d upsampling when
+        target_mode="follow_trajectory" (never for quat columns).
+        """
+        # Local import to avoid a hard irs_mpc2 -> scripts dependency at
+        # module load time. scripts.utils is already used elsewhere in
+        # the repo (e.g. irs_rrt/irs_rrt_trajectory.py).
+        from scripts import utils
+
+        q_trj = np.asarray(q_trj, dtype=float)
+        T0 = len(u_trj)
+        if len(q_trj) != T0 + 1:
+            raise ValueError(
+                f"q_trj must have len == len(u_trj) + 1, "
+                f"got {len(q_trj)} vs {T0 + 1}"
+            )
+
+        q0 = q_trj[0]
+        q_final = q_trj[-1]
+
+        indices_q_u_into_x = np.asarray(
+            self.q_sim.get_q_u_indices_into_q(), dtype=int
+        )
+        quat_cols = indices_q_u_into_x[:4]
+        T = T0 * n_steps_per_h
+
+        if target_mode == "constant_final":
+            q_d = np.copy(q0)
+            q_d[indices_q_u_into_x] = q_final[indices_q_u_into_x]
+            q_trj_d = np.tile(q_d, (T + 1, 1))
+
+        elif target_mode == "interpolate_endpoints":
+            # Build a 2-knot coarse trajectory (arms at q0, object endpoints)
+            # and FOH+SLERP-upsample. For 2 knots, FOH and cubic both reduce
+            # to linear, so the method is hardcoded here; only
+            # target_mode="follow_trajectory" passes interp_method through.
+            q_coarse = np.tile(np.copy(q0), (2, 1))
+            q_coarse[1, indices_q_u_into_x] = q_final[indices_q_u_into_x]
+            q_trj_d = utils.upsample_trj(
+                q_coarse,
+                n_steps_per_h=T,
+                quat_col_indices=quat_cols,
+                method="foh",
+            )
+
+        elif target_mode == "follow_trajectory":
+            q_trj_d = utils.upsample_trj(
+                q_trj,
+                n_steps_per_h=n_steps_per_h,
+                quat_col_indices=quat_cols,
+                method=interp_method,
+            )
+
+        else:
+            raise ValueError(f"Unknown target_mode: {target_mode!r}")
 
         u_trj_small = IrsMpcQuasistatic.calc_u_trj_small(
-            u_trj, h_small, n_steps_per_h
+            u_trj, n_steps_per_h, method=interp_method
         )
 
         self.initialize_problem(x0=q0, x_trj_d=q_trj_d, u_trj_0=u_trj_small)

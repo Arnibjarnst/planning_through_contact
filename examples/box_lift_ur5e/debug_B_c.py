@@ -123,9 +123,9 @@ def cast_to_cone(joints, normal, arm_pose, deg):
     ee_pose_new = np.concatenate([ee_quat_new.wxyz(), ee_pose[4:]])
     
     # TODO: get all configurations and filter
-    joints_new = utils.get_joints(ee_pose_new, arm_pose, joints, robot='ur5e')
+    joints_new = utils.get_joints(ee_pose_new, arm_pose, joints)
 
-    print(ee_pose, utils.get_ee_pose(joints_new, arm_pose, 'ur5e'), ee_pose_new)
+    print(ee_pose, utils.get_ee_pose(joints_new, arm_pose), ee_pose_new)
 
     return joints_new
 

@@ -1,3 +1,19 @@
+"""
+Setup for the box_rotate_ur5e task: rotate a box by a configurable angle
+about its vertical (z) axis using a single UR5e arm.
+
+The box stays at the same position; only the yaw changes. For a 90° rotation
+the arm needs to push against an edge/face with friction to spin the box in
+place — the quasi-static model captures this via contact forces.
+
+To change the rotation, edit ROTATION_DEGREES below.
+"""
+
+# -------------------------------------------------------------------------
+# Task parameters — edit these to change the task
+# -------------------------------------------------------------------------
+ROTATION_DEGREES = 90.0   # rotate the box by this many degrees about z-axis
+
 import os
 import numpy as np
 
@@ -24,13 +40,13 @@ object_name = "box"
 # [qw, qx, qy, qz, x, y, z]
 arm_pose = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 eef_offset = 0.013 #0.013  # 1.3cm offset for the black tool attacher thing
-arm_kp = np.array([800, 600, 600, 400, 300, 200])
+arm_kp = np.array([800, 600, 300, 200, 100, 100])
 
 # Box parameters
 object_dims = np.array([0.34, 0.235, 0.27])
 box_mass = 4.4
 box_friction = 0.35        # cardboard
-ground_friction = 0.35     # wood
+ground_friction = 0.01     # wood
 ground_offset = 0.018      # wooden plate 1.8cm above robot base plane
 
 # Generate model files from the parameters above
@@ -38,23 +54,22 @@ q_model_path = utils.generate_ur5e_box_models(
     models_dir, object_dims, {eef_name: arm_pose},
     mass=box_mass, friction=box_friction,
     ground_friction=ground_friction, ground_offset=ground_offset,
-    prefix="box_push", joint_kp=arm_kp,
+    prefix="box_rotate", joint_kp=arm_kp,
 )
 q_model_path_gradients = q_model_path
-q_u0 = np.array([1, 0, 0, 0, 0, 0.5, ground_offset + object_dims[-1] / 2])
-q_u1 = np.array([1, 0, 0, 0, 0.2, 0.5, ground_offset + object_dims[-1] / 2])
 t0 = 0.0
 t1 = 1.0
 
 q_a0 = np.array([0, -np.pi/2, 0, 0, 0, 0])
 
+box_position = np.array([0, 0.5, ground_offset + object_dims[-1] / 2])
 
 def get_obj_pose_from_t(t: float):
+    """Interpolate yaw linearly from 0 to ROTATION_DEGREES."""
     t = max(min(t, 1), 0)
-    # fine since no rotation
-    pose = q_u0 + (q_u1 - q_u0) * t
-    return pose
-
+    rad = t * np.deg2rad(ROTATION_DEGREES)
+    quat = RollPitchYaw(0.0, 0.0, rad).ToQuaternion()
+    return np.concatenate([quat.wxyz(), box_position])
 
 pose_sampling_function = get_obj_pose_from_t
 
@@ -63,7 +78,7 @@ goal_u = pose_sampling_function(t1)
 
 # data collection.
 _repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-data_folder = os.path.join(_repo_root, "ptc_data", "box_push_ur5e")
+data_folder = os.path.join(_repo_root, "ptc_data", "box_rotate_ur5e")
 
 q_parser = QuasistaticParser(q_model_path)
 q_vis = QuasistaticVisualizer.make_visualizer(q_parser)
@@ -125,6 +140,7 @@ rrt_params.goal[idx_q_u] = goal_u
 rrt_params.termination_tolerance = 0.05
 rrt_params.connect_from_behind = False
 rrt_params.connect_to_front = False
+rrt_params.regrasp_cooldown = 7
 
 # Subgoal / trajectory
 rrt_params.subgoal_ts = [0.0, 1.0]
@@ -147,12 +163,14 @@ rrt_params.smoothing_mode = SmoothingMode.k1AnalyticIcecream
 rrt_params.du_star_mode = DuStarMode.ConstrainedLSTSQ
 rrt_params.log_barrier_weight_for_bundling = 1000
 rrt_params.step_in = True
+rrt_params.stickiness_scale_angular = 15.0
+rrt_params.stickiness_scale_linear = 2.5
 
 
 # Sampling
 rrt_params.batch_size = 32
 rrt_params.initial_contact_samples = 256
-rrt_params.grasp_prob = 0.0
+rrt_params.grasp_prob = 0.2
 
 # Robot / contact
 rrt_params.arm_poses = {eef_name: arm_pose}
@@ -179,7 +197,7 @@ def get_best_joint_configurations(joint_configs, q_, model_idx, joint_idx):
         sg = q_sim_py.get_scene_graph()
         query_object = sg.GetOutputPort("query").Eval(q_sim_py.context_sg)
         collision_pairs = (
-            query_object.ComputeSignedDistancePairwiseClosestPoints(0.0)
+            query_object.ComputeSignedDistancePairwiseClosestPoints(0.01) # Non EE need to be 1cm away from collision
         )
         inspector = query_object.inspector()
 

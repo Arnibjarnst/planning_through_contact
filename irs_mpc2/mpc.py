@@ -19,6 +19,9 @@ def solve_mpc(
     u_bound_rel=None,
     xinit=None,
     uinit=None,
+    R_accel=None,
+    u_prev_1=None,  # u_{t_global-1}, for d2u boundary
+    u_prev_2=None,  # u_{t_global-2}, for d2u boundary
 ):
     """
     Solve time-varying LQR problem as an instance of a quadratic program (QP).
@@ -92,6 +95,25 @@ def solve_mpc(
                 du = ut[t] - ut[t - 1]
 
             prog.AddQuadraticCost(du.dot(R).dot(du))
+
+            # Acceleration penalty: d2u_t = u_t - 2*u_{t-1} + u_{t-2}
+            # For the first 2 timesteps of the sub-problem we use u_prev_1 and
+            # u_prev_2 (from the previously-solved outer loop) as boundary.
+            if R_accel is not None:
+                if t == 0:
+                    if u_prev_1 is not None and u_prev_2 is not None:
+                        d2u = ut[t] - 2 * u_prev_1 + u_prev_2
+                    else:
+                        # No prior: fall back to joint position as both
+                        d2u = ut[t] - xt[t, indices_u_into_x]
+                elif t == 1:
+                    if u_prev_1 is not None:
+                        d2u = ut[t] - 2 * ut[t - 1] + u_prev_1
+                    else:
+                        d2u = ut[t] - 2 * ut[t - 1] + xt[0, indices_u_into_x]
+                else:
+                    d2u = ut[t] - 2 * ut[t - 1] + ut[t - 2]
+                prog.AddQuadraticCost(d2u.dot(R_accel).dot(d2u))
 
         # Add constraints.
         if x_bound_abs is not None:

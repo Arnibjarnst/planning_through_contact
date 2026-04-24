@@ -1,9 +1,17 @@
 import os
 
 import numpy as np
+from scipy.interpolate import CubicSpline
 
 from ur_ikfast import ur_kinematics
-from pydrake.all import RigidTransform, Quaternion, RotationMatrix, RollPitchYaw
+from pydrake.all import (
+    RigidTransform,
+    Quaternion,
+    RotationMatrix,
+    RollPitchYaw,
+    PiecewisePolynomial,
+    PiecewiseQuaternionSlerp,
+)
 
 def cosine_weighted_cone(theta_max):
     """
@@ -72,11 +80,11 @@ def get_wrist_poses(positions: np.ndarray, directions: np.ndarray):
     ])
     return poses
 
-def get_ee_pose(joints, robot_pose, robot="ur5e", eef_offset=0.02):
-    ur5_arm = ur_kinematics.URKinematics(robot)
+def get_ee_pose(joints, robot_pose, eef_offset=0.02):
+    ur5e_arm = ur_kinematics.URKinematics("ur5e")
 
     # [x, y, z, qx, qy, qz, qw]
-    wrist_pose_local = ur5_arm.forward(joints)
+    wrist_pose_local = ur5e_arm.forward(joints)
     wrist_quaternion = Quaternion(x=wrist_pose_local[3], y=wrist_pose_local[4], z=wrist_pose_local[5], w=wrist_pose_local[6])
 
     # shift ee position along wrist z by eef_offset (0 if no sphere EEF)
@@ -104,8 +112,8 @@ def ee_pose_to_wrist_pose(pose, eef_offset=0.02):
 
     return pose_wrist
 
-def get_joints(pose, robot_pose, last=np.zeros(6), get_all_solutions=False, robot='ur5e', eef_offset=0.02):
-    ur5_arm = ur_kinematics.URKinematics(robot)
+def get_joints(pose, robot_pose, last=np.zeros(6), get_all_solutions=False, eef_offset=0.02):
+    ur5e_arm = ur_kinematics.URKinematics("ur5e")
 
     wrist_pose = ee_pose_to_wrist_pose(pose, eef_offset=eef_offset)
 
@@ -121,13 +129,13 @@ def get_joints(pose, robot_pose, last=np.zeros(6), get_all_solutions=False, robo
     pose_pos_rel = RT_pose_rel.translation()
     pose_quat_rel = RT_pose_rel.rotation().ToQuaternion()
 
-    # ur5_arm requires [x, y, z, qx, qy, qz, w]
+    # ur5e_arm requires [x, y, z, qx, qy, qz, w]
     pose_rel = np.array([
         pose_pos_rel[0], pose_pos_rel[1], pose_pos_rel[2],
         pose_quat_rel.x(), pose_quat_rel.y(), pose_quat_rel.z(), pose_quat_rel.w()
     ])
 
-    return ur5_arm.inverse(pose_rel, get_all_solutions, last)
+    return ur5e_arm.inverse(pose_rel, get_all_solutions, last)
 
 # [qw, qx, qy, qz, x, y, z] -> [x, y, z, qw, qx, qy, qz]
 # Supports batched poses
@@ -338,6 +346,7 @@ def generate_ur5e_box_models(
     prefix: str = "generated",
     robot_sdf: str = "ur5e.sdf",
     gradients: bool = False,
+    joint_kp: list = None,
 ) -> str:
     """Generate SDF and YML model files for N UR5e arms + box task.
 
@@ -428,9 +437,12 @@ def generate_ur5e_box_models(
         _write_directive(ground_yml_grad_name, directive_grad_name)
 
     # 3. Generate q_sys YML(s)
+    if joint_kp is None:
+        joint_kp = [400, 400, 400, 300, 200, 100]
+    kp_str = "[" + ", ".join(str(k) for k in joint_kp) + "]"
     robot_entries = ""
     for name in arms:
-        robot_entries += f"  -\n    name: {name}\n    Kp: [800, 600, 600, 600, 400, 200]\n"
+        robot_entries += f"  -\n    name: {name}\n    Kp: {kp_str}\n"
 
     def _write_q_sys(directive_ref, box_sdf_ref, out_path):
         q_sys_yml = f"""model_directive: package://quasistatic_simulator/{directive_ref}
@@ -460,3 +472,74 @@ quasistatic_sim_params:
         return q_sys_path, q_sys_grad_path
 
     return q_sys_path
+
+
+def upsample_trj(
+    trj_coarse,
+    n_steps_per_h,
+    quat_col_indices=None,
+    method="foh",
+):
+    """Time-upsample a state trajectory to a finer knot spacing.
+
+    Given `trj_coarse` of shape (N, dim_q) with N = T0 + 1 coarse knots,
+    returns a trajectory of shape (T0*n_steps_per_h + 1, dim_q).
+
+    Non-quaternion columns are interpolated by `method`:
+      "zoh"   - zero-order hold (staircase).
+      "foh"   - first-order hold / piecewise linear.
+      "cubic" - natural cubic spline (scipy.CubicSpline, bc_type='natural').
+
+    Quaternion columns, if `quat_col_indices` (expected wxyz, length 4) is
+    given, are always interpolated with Drake's `PiecewiseQuaternionSlerp`
+    regardless of `method`.
+    """
+    trj_coarse = np.asarray(trj_coarse, dtype=float)
+    N, dim_q = trj_coarse.shape
+    T0 = N - 1
+    T_plus_1 = T0 * n_steps_per_h + 1
+
+    t_knots = np.arange(N, dtype=float)
+    t_fine = np.arange(T_plus_1) / n_steps_per_h
+
+    if quat_col_indices is not None and len(quat_col_indices) == 4:
+        quat_cols = np.asarray(quat_col_indices, dtype=int)
+        non_quat_cols = np.setdiff1d(np.arange(dim_q), quat_cols, assume_unique=False)
+    else:
+        quat_cols = None
+        non_quat_cols = np.arange(dim_q)
+
+    result = np.zeros((T_plus_1, dim_q))
+
+    if len(non_quat_cols) > 0:
+        data = trj_coarse[:, non_quat_cols]
+        if method == "zoh":
+            # Each fine sample takes the value at the last coarse knot on
+            # or before it. At t_fine == N-1 the index lands exactly on the
+            # final knot, so the final sample is q[N-1].
+            idx = np.minimum(np.floor(t_fine).astype(int), N - 1)
+            result[:, non_quat_cols] = data[idx]
+        elif method == "foh":
+            poly = PiecewisePolynomial.FirstOrderHold(t_knots, data.T)
+            for k, t in enumerate(t_fine):
+                result[k, non_quat_cols] = poly.value(float(t)).squeeze()
+        elif method == "cubic":
+            cs = CubicSpline(t_knots, data, axis=0, bc_type="natural")
+            result[:, non_quat_cols] = cs(t_fine)
+        else:
+            raise ValueError(
+                f"Unknown method {method!r}; expected one of "
+                "'zoh', 'foh', 'cubic'."
+            )
+
+    if quat_cols is not None:
+        quats = []
+        for i in range(N):
+            wxyz = trj_coarse[i, quat_cols]
+            n = np.linalg.norm(wxyz)
+            quats.append(Quaternion(wxyz / (n if n > 1e-10 else 1.0)))
+        slerp = PiecewiseQuaternionSlerp(t_knots, quats)
+        for k, t in enumerate(t_fine):
+            result[k, quat_cols] = slerp.value(float(t)).squeeze()
+
+    return result
