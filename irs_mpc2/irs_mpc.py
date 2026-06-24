@@ -44,7 +44,6 @@ class IrsMpcQuasistatic:
         self.plant = self.q_sim.get_plant()
         self.solver = GurobiSolver()
 
-        # unpack various parameters for convenience.
         self.dim_x = self.q_sim.get_plant().num_positions()
         self.dim_u = self.q_sim.num_actuated_dofs()
         self.indices_u_into_x = self.q_sim.get_q_a_indices_into_q()
@@ -101,13 +100,11 @@ class IrsMpcQuasistatic:
         self.x0 = x0
         self.x_trj_d = x_trj_d
 
-        # best cost
         self.idx_best = None
         self.x_trj_best = None
         self.u_trj_best = None
         self.cost_best = np.inf
 
-        # logging
         self.x_trj_list = []
         self.u_trj_list = []
 
@@ -244,7 +241,6 @@ class IrsMpcQuasistatic:
 
         plt.title("Trajectory cost")
         plt.xlabel("Iterations")
-        # plt.yscale('log')
         plt.grid(True)
         plt.legend()
         plt.show()
@@ -409,7 +405,6 @@ class IrsMpcQuasistatic:
         else:
             raise NotImplementedError
 
-        # Convert lists of 2D arrays to 3D arrays.
         B_trj = np.array(B_trj)
 
         if self.irs_mpc_params.use_A:

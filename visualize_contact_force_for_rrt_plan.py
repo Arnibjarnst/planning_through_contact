@@ -159,15 +159,6 @@ q_vis.render_trajectory(
     fps=120,
 )
 
-#
-# folder_path = os.path.join(frames_path_prefix, "allegro_rgba_0")
-# q_vis.render_trajectory(x_traj_knots=q_knots_all,
-#                         h=0.1,
-#                         folder_path=folder_path,
-#                         fps=120,
-#                         contact_results_list=contact_results_list,
-#                         stride=1)
-
 
 #%%
 for i in range(len(q_trj_optimized_list) - 1):

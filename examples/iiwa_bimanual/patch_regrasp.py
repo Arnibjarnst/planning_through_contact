@@ -71,13 +71,6 @@ for n in range(n_segment - 1):
     qu_start = q_knots_ref_list[n][-1, idx_q_u]
     qu_end = q_knots_ref_list[n + 1][0, idx_q_u]
 
-    # q_dynamics.q_sim_py.update_mbp_positions_from_vector(q_knots_ref_list[n][-1])
-    # q_dynamics.q_sim_py.draw_current_configuration()
-    # input()
-    # q_dynamics.q_sim_py.update_mbp_positions_from_vector(q_knots_ref_list[n+1][0])
-    # q_dynamics.q_sim_py.draw_current_configuration()
-    # input()
-
     ##
     qin = step_out(q_sim, q_sim_py, q_knots_ref_list[n][-1])
     qout = step_out(q_sim, q_sim_py, q_knots_ref_list[n + 1][0])

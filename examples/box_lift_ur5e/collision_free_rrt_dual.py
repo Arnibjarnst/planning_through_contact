@@ -448,22 +448,6 @@ for n in range(len(q_knots_ref_list) - 1):
     print(f"qa_out: {qa_out}")
 
     cf_rrt = CollisionFreeRRT(cf_params, qu_start, 0.0)
-    # cf_rrt.q_lb = (
-    #     np.minimum(qa_start, qa_end) - 0.3
-    # )
-    # cf_rrt.q_lb = np.maximum(
-    #     cf_rrt.q_lb,
-    #     joint_limits[idx_a_l][:,0],
-    # )
-
-    # cf_rrt.q_ub = (
-    #     np.maximum(qa_start, qa_end) + 0.3
-    # )
-    # cf_rrt.q_ub = np.minimum(
-    #     cf_rrt.q_ub,
-    #     joint_limits[idx_a_l][:,1],
-    # )
-
     cf_rrt.iterate(debug=True)
 
     cf_rrt_trj = cf_rrt.shortcut_path(cf_rrt.get_final_path_q(), num_tries=1000)

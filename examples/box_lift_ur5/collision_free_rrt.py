@@ -111,17 +111,6 @@ class CollisionFreeRRT(Rrt):
         else:
             xnext = q_start + self.params.stepsize * direction
 
-        # print(distance, direction, self.params.stepsize)
-        
-        # print("extending towards")
-        # q_sim_py.update_mbp_positions_from_vector(self.map_qa_to_q(q))
-        # q_sim_py.draw_current_configuration()
-        # input()
-        # print("substep")
-        # q_sim_py.update_mbp_positions_from_vector(self.map_qa_to_q(xnext))
-        # q_sim_py.draw_current_configuration()
-        # input()
-        
         if debug:
             print(f"segment start: {q_start}")
         collision = True
@@ -513,22 +502,6 @@ for n in range(len(segments) - 1):
         print(qa_best)
 
         cf_rrt = CollisionFreeRRT(cf_params, qu_start, left_arm=left_arm)
-        # cf_rrt.q_lb = (
-        #     np.minimum(qa_start, qa_end) - 0.3
-        # )
-        # cf_rrt.q_lb = np.maximum(
-        #     cf_rrt.q_lb,
-        #     joint_limits[idx_a_l][:,0],
-        # )
-
-        # cf_rrt.q_ub = (
-        #     np.maximum(qa_start, qa_end) + 0.3
-        # )
-        # cf_rrt.q_ub = np.minimum(
-        #     cf_rrt.q_ub,
-        #     joint_limits[idx_a_l][:,1],
-        # )
-
         cf_rrt.iterate()
 
         cf_rrt_trj = cf_rrt.shortcut_path(cf_rrt.get_final_path_q())

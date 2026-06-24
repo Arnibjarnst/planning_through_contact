@@ -218,13 +218,6 @@ def step_in(q):
         q_next[idx_q_a_r] = cast_to_cone(q_next[idx_q_a_r], min_normal_right, arm_r_pose, 30)
 
     
-    # q_vis.draw_configuration(q)
-    # input("Before:")
-    # q_vis.draw_configuration(q_next)
-    # input("After stepping in")
-    # q_vis.draw_configuration(q_next)
-    # input("After casting to 30 degree cone")
-
     return q_next
 
 while True:
@@ -265,14 +258,6 @@ while True:
             if i == '0':
                 break
 
-    
-    # while True:
-    #     j = int(input("joint: "))
-    #     if j < 0 or j > len(qi):
-    #         break
-    #     rad = float(input("rad: "))
-    #     qi[j] = rad
-    #     q_vis.draw_configuration(qi)
     
     qs = np.array(qs)
     m_dists = np.array(m_dists)

@@ -136,15 +136,6 @@ class MeshcatJointSliders:
 
     def run(self, event=None):
 
-        # old_positions = self._plant.GetPositions(plant_context)
-        # positions = self._positions
-        # for i, s in self._sliders.items():
-        #     positions[i] = self._meshcat.GetSliderValue(s)
-        # if not np.array_equal(positions, old_positions):
-        #     self._plant.SetPositions(plant_context, positions)
-        #     if callback:
-        #         callback(plant_context)
-        #     self.visualizer.Publish(vis_context)
         self._plant.SetPositions(
             self.plant_context, self.allegro_state.position
         )

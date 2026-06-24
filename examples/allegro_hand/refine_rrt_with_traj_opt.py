@@ -28,15 +28,6 @@ from irs_mpc2.irs_mpc import IrsMpcQuasistatic
 from irs_mpc2.irs_mpc_params import SmoothingMode, IrsMpcQuasistaticParameters
 from allegro_hand_setup import robot_name, object_name
 
-# %%
-# pickled_tree_path = os.path.join(
-#     os.path.dirname(irs_rrt.__file__),
-#     "..",
-#     "examples",
-#     "allegro_hand",
-#     "tree_1000_0.pkl",
-# )
-
 pickled_tree_path = os.path.join(
     os.path.dirname(irs_rrt.__file__),
     "..",

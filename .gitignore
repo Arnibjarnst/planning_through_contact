@@ -10,5 +10,14 @@
 *.html
 *.npy
 *.pkl
+*.npz
+*.log
 lcmlog*
 .aider*
+.vscode/
+RL_data/
+ptc_data/
+ablation_data/
+test_data/
+*_log.json
+*_log.json.bak

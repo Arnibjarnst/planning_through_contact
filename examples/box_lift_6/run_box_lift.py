@@ -24,13 +24,6 @@ q_vis.draw_object_triad(
     length=0.1, radius=0.001, opacity=1, path="sphere/sphere"
 )
 
-# while True:
-#     theta, phi = np.array([float(x) for x in input().split()])
-#     q = np.copy(q0)
-#     q[idx_q_a_l] = np.array([0, 0, 1, theta, phi])
-#     q_sim_py.update_mbp_positions_from_vector(q)
-#     q_sim_py.draw_current_configuration()
-
 time_to_dist_to_goal = prob_rrt.iterate_batched(4)
 
 time_to_dist_to_goal = np.array(time_to_dist_to_goal)

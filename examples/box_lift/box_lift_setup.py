@@ -375,48 +375,6 @@ class MagicContactSampler(ContactSampler):
 
         return p1, p2, dir1, dir2
 
-    # def sample_contact(self, q):
-    #     q0 = np.copy(q)
-    #     q0_rot_mat = Quaternion(q[self.q_sim.get_q_u_indices_into_q()[:4]]).rotation()
-    #     q0_pos = q[self.q_sim.get_q_u_indices_into_q()[4:]]
-        
-    #     for _ in range(100):
-    #         contact_1_local = self.sample_contact_point()
-    #         contact_1_global = q0_rot_mat @ contact_1_local + q0_pos
-
-    #         if contact_1_global[2] >= self.eef_radius:
-    #             q0[self.q_sim.get_q_a_indices_into_q()[:3]] = contact_1_global
-                
-    #             for _ in range(100):
-    #                 contact_2_local = self.sample_contact_point()
-    #                 eef_dist = np.linalg.norm(contact_1_local - contact_2_local)
-    #                 contact_2_global = q0_rot_mat @ contact_2_local + q0_pos
-            
-    #                 if eef_dist > 2 * self.eef_radius and contact_2_global[2] >= self.eef_radius:
-    #                     q0[self.q_sim.get_q_a_indices_into_q()[3:]] = contact_2_global
-    #                     return q0
-
-    #     raise Exception("Failed to sample Contact points")
-
-
-    # def sample_contact(self, q):
-    #     q0 = np.copy(q)
-    #     q0_rot_mat = Quaternion(q[self.q_sim.get_q_u_indices_into_q()[:4]]).rotation()
-    #     q0_pos = q[self.q_sim.get_q_u_indices_into_q()[4:]]
-        
-    #     for _ in range(1000):
-    #         contact_1_local, contact_2_local = self.sample_contact_points()
-
-    #         contact_1_global = q0_rot_mat @ contact_1_local + q0_pos
-    #         contact_2_global = q0_rot_mat @ contact_2_local + q0_pos
-
-    #         if contact_1_global[2] >= self.eef_radius and contact_2_global[2] >= self.eef_radius:
-    #             q0[idx_q_a_l] = contact_1_global
-    #             q0[idx_q_a_r] = contact_2_global
-    #             return q0
-
-    #     raise Exception("Failed to sample Contact points")
-    
     def sample_contact(self, q):
         q0 = np.copy(q)
         q0_quat = Quaternion(q[idx_q_u[:4]])

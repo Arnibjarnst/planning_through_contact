@@ -84,9 +84,6 @@ class IrsRrt(Rrt):
         self.sim_params.log_barrier_weight = (
             rrt_params.log_barrier_weight_for_bundling
         )
-        # self.sim_params.forward_mode = kSmoothingMode2ForwardDynamicsModeMap[
-        #     rrt_params.smoothing_mode
-        # ]
         self.sim_params.forward_mode = ForwardDynamicsMode.kSocpMp
         self.sim_params.use_free_solvers = rrt_params.use_free_solvers
 
@@ -333,12 +330,9 @@ class IrsRrt(Rrt):
         Extend towards a specified configuration q and return a new
         node,
         """
-        # Compute least-squares solution.
         du = np.linalg.lstsq(
             parent_node.Bhat, q - parent_node.chat, rcond=None
         )[0]
-
-        # Normalize least-squares solution.
         du = du / np.linalg.norm(du)
         ustar = parent_node.ubar + self.rrt_params.stepsize * du
         xnext = self.q_sim.calc_dynamics(parent_node.q, ustar, self.sim_params)
@@ -363,7 +357,6 @@ class IrsRrt(Rrt):
         q_temp = np.copy(q)
         q_temp[self.q_u_indices_into_x[4]] = 3
 
-        # Simulate one step
         qnext = self.q_sim.calc_dynamics(q_temp, q_temp[self.q_a_indices_into_x], self.sim_params)
         obj_pose_next = qnext[self.q_u_indices_into_x]
 
@@ -521,7 +514,6 @@ class IrsRrt(Rrt):
     def make_from_pickled_tree(
         tree: networkx.DiGraph, internal_vis: InternalVisualizationType
     ):
-        # Factory method for making an IrsRrt object from a pickled tree.
         q_model_path = IrsRrt.load_q_model_path(tree)
         parser = QuasistaticParser(q_model_path)
 

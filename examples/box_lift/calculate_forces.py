@@ -67,9 +67,6 @@ for i_s, (t_start, t_end) in enumerate(segments):
         q_knots_computed[t + 1] = q_sim.calc_dynamics(
             q_knots_computed[t], u_trj[t], sim_params
         )
-        # q_knots_computed[t+1] = q_sim.calc_dynamics(
-        #     q_trj[t], u_trj[t], sim_params
-        # )
         contact_result = q_sim.get_contact_results_copy()
         i_f = t_start + t
         for j in range(contact_result.num_point_pair_contacts()):
@@ -111,52 +108,6 @@ out = {
 
 with open(filename, "wb") as f:
     pickle.dump(out, f)
-
-
-# import numpy as np
-# import matplotlib.pyplot as plt
-# from mpl_toolkits.mplot3d import Axes3D
-
-# def plot_vectors(origins, vectors, colors=None):
-#     """
-#     Plot 3D vectors as arrows starting at given origins.
-
-#     origins: (N, 3) array of starting points
-#     vectors: (N, 3) array of vector directions
-#     colors:  optional list/array of colors
-#     """
-#     origins = np.asarray(origins)
-#     vectors = np.asarray(vectors)
-#     N = origins.shape[0]
-
-#     if colors is None:
-#         colors = ['C0'] * N  # default color for all
-
-#     fig = plt.figure()
-#     ax = fig.add_subplot(111, projection='3d')
-
-#     for i in range(N):
-#         x, y, z = origins[i]
-#         u, v, w = vectors[i]
-#         ax.quiver(x, y, z, u, v, w, color=colors[i], length=1, normalize=False)
-
-#     ax.set_xlim(-1, 1)
-#     ax.set_ylim(-1, 1)
-#     ax.set_zlim(0, 1)
-
-#     ax.set_xlabel('X')
-#     ax.set_ylabel('Y')
-#     ax.set_zlabel('Z')
-#     ax.set_title('3D Vectors')
-
-#     plt.show()
-
-
-# for i, q in enumerate(q_knots_computed_all):
-#     f = forces[i].reshape((2,3)) / 10.0
-#     q_eef = q[indices_q_a_into_q].reshape((2,3))
-
-#     plot_vectors(q_eef, f)
 
 
 

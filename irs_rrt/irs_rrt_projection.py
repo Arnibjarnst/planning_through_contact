@@ -79,43 +79,6 @@ class IrsRrtProjection(IrsRrt):
 
         return subgoal
 
-    # def sample_subgoal(self):
-    #     # Sample translation
-    #     subgoal = np.random.rand(self.dim_x)
-    #     subgoal = self.q_lb + (self.q_ub - self.q_lb) * subgoal
-
-    #     rpy = RollPitchYaw(subgoal[self.q_u_indices_into_x][:3])
-    #     subgoal[self.q_u_indices_into_x[:4]] = rpy.ToQuaternion().wxyz()
-
-    #     return subgoal
-    
-    # def sample_subgoal(self, t=None):
-    #     """
-    #     Sample a subgoal from the configuration space.
-    #     """
-    #     # sample robots
-    #     subgoal = np.random.rand(self.dim_x)
-    #     subgoal = self.q_lb + (self.q_ub - self.q_lb) * subgoal
-
-    #     # sample obj pose
-    #     if t is None:
-    #         t0 = self.trajectory_ts[self.curr_goal_i - 1]
-    #         t1 = self.trajectory_ts[self.curr_goal_i]
-    #         t = np.random.rand() * (t1 - t0) + t0
-    #     obj_pose_t = self.get_obj_pose_from_t(t)
-    #     subgoal[self.q_u_indices_into_x] = obj_pose_t
-
-    #     obj_rot_mat = Quaternion(obj_pose_t[:4]).rotation()
-    #     obj_trans =  obj_pose_t[4:]
-
-    #     if self.fixed_eef_1 is not None:
-    #         subgoal[self.q_a_indices_into_x[:3]] = obj_rot_mat @ self.fixed_eef_1 + obj_trans
-        
-    #     if self.fixed_eef_2 is not None:
-    #         subgoal[self.q_a_indices_into_x[3:]] = obj_rot_mat @ self.fixed_eef_2 + obj_trans        
-
-    #     return subgoal
-    
     def calc_distance(self, query, node):
         # 1 x n
         mu_batch = node.chat_u[None, :]

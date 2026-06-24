@@ -163,17 +163,6 @@ class MeshcatAllegroBallVisualizer(LeafSystem):
                 RigidTransform(pose_estimator.p_palm_W[i]),
             )
 
-        # Palm frame.
-        # palm_frame_path = f"optitrack/{kAllegroPalmName}/frame"
-        # add_triad(
-        #     vis=self.meshcat,
-        #     prefix=palm_frame_path,
-        #     name="triad",
-        #     length=0.075,
-        #     radius=0.0015,
-        #     opacity=0.1)
-        # self.meshcat.SetTransform(palm_frame_path, pose_estimator.X_WP)
-
         # Sphere markers.
         for i in range(4):
             name = f"optitrack/{kBallName}/{i}"

@@ -388,9 +388,6 @@ class IrsRrtTrajectory(IrsRrt):
                 qdot = np.linalg.pinv(J_a).dot(min_dist * -min_normal[:2])
 
                 q_next[joint_indices] += qdot
-                # q_next[joint_indices] = self.cast_to_cone(
-                #     q_next[joint_indices], min_normal, arm_pose, 30
-                # )
 
         return q_next
     

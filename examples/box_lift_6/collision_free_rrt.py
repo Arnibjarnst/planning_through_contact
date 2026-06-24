@@ -419,20 +419,6 @@ for n in range(len(segments) - 1):
     qin = step_out(q_sim, q_sim_py, q_start, scale=0.01)
     qout = step_out(q_sim, q_sim_py, q_end, scale=0.01)
 
-    # print("qstart")
-    # q_vis.draw_configuration(q_start)
-    # input("next")
-    # print("qin")
-    # q_vis.draw_configuration(qin)
-    # input("next")
-
-    # print("q_end")
-    # q_vis.draw_configuration(q_end)
-    # input("next")
-    # print("qout")
-    # q_vis.draw_configuration(qout)
-    # input("continue")
-
     cf_ee_trjs = []
 
     # Iterate one EE at a time (always just assume it's ee_l)
